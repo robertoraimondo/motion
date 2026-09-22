@@ -1,5 +1,8 @@
 # Motion Studio
 
+<img width="1912" height="1027" alt="image" src="https://github.com/user-attachments/assets/b6e9e8c2-eb88-472f-bbbf-865ffd92c674" />
+
+
 Motion Studio is a local video studio for creating short animations from text prompts and reference images. The React/Vite interface uses two local generation engines:
 
 - **Wan 2.1 1.3B + ComfyUI** for text-to-video (T2V).
