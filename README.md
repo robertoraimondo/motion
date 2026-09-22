@@ -163,3 +163,9 @@ When a local service is unavailable or a render fails, Motion Studio displays th
 | `npm run desktop` | Start the Electron desktop app |
 | `npm run desktop:build` | Build the Windows portable executable |
 | `npm run restart:local` | Restart local services and start the requested processes |
+
+## License
+
+This project is open source and available under the MIT License.
+
+**Author: Roberto Raimondo -** © 2026 All Rights Reserved.
