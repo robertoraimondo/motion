@@ -1,0 +1,14 @@
+node_modules/
+dist/
+release/
+logs/
+*.log
+*.tsbuildinfo
+scripts/__pycache__/
+.env
+.env.*
+motion-config.json
+
+# Local ComfyUI checkout, Python environment, models, caches, and generated media.
+ComfyUI/
+ComfyUI_examples/
