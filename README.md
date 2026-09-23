@@ -28,6 +28,7 @@ Generation requests, imported images, audio, and rendered videos stay on the com
 - Choose between **LTX Video** and **Wan 2.1 · 1.3B** when the model is installed.
 - Choose a duration of 3, 5, 8, or 10 seconds.
 - Choose a 16:9, 9:16, 3:4, or 1:1 format.
+- Use the **Facebook Reel · 1080 × 1920** export preset for a portrait MP4 ready to upload as a Facebook Reel. The preset selects 9:16 and 5 seconds, and normalizes the LTX result to H.264, 30 fps, AAC, and fast-start MP4 metadata.
 - Generate image-to-video animations with LTX Desktop. LTX requires a reference image and supports 16:9 and 9:16 in this application.
 - Generate text-to-video animations with the local Wan workflow in ComfyUI.
 - Validate incompatible model and reference-image combinations before starting a render.
@@ -119,7 +120,7 @@ The desktop process creates the Electron window, starts the Motion bridge, start
 
 1. Open Motion Studio and confirm that **Local mode** and **GPU ready** are visible.
 2. Select **Settings** in the top bar if the output folder needs to be changed.
-3. For image animation, import a reference image and select **LTX Video**. For generated scenes without a reference image, select **Wan 2.1 · 1.3B**.
+3. For image animation, import a reference image and select **LTX Video**. For a Facebook Reel, choose **Facebook Reel · 1080 × 1920** and keep LTX selected. For generated scenes without a reference image, select **Wan 2.1 · 1.3B**.
 4. Optionally enter a natural-language request and choose **Create prompt**, then review or edit the generated prompt.
 5. Choose duration and format, optionally insert audio, and select **Generate video**.
 6. Preview, download, delete, or extend the result. Audio is mixed locally after video generation.

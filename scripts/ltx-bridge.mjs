@@ -87,6 +87,10 @@ const writeDataUrl = async (dataUrl, filePath) => {
   await writeFile(filePath, Buffer.from(match[1], 'base64'))
 }
 
+const normalizeFacebookVideo = async (sourcePath, outputPath) => {
+  await execFileAsync('ffmpeg', ['-y', '-i', sourcePath, '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black', '-r', '30', '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', outputPath])
+}
+
 const mixVideoWithMusic = async (body) => {
   const id = randomUUID()
   const videoPath = path.join(uploadDirectory, `${id}-video.input`)
@@ -165,8 +169,11 @@ const extendVideo = async (body) => {
       }
     }
     if (!resultPath || (extendResponse.status !== 200 && !resultPath)) throw new Error(result.message || result.detail || 'LTX rejected the video extension.')
-    const video = await readFile(resultPath)
+    const outputPath = body.exportPreset === 'facebook-reel' ? path.join(uploadDirectory, `${randomUUID()}-facebook-extended.mp4`) : resultPath
+    if (body.exportPreset === 'facebook-reel') await normalizeFacebookVideo(resultPath, outputPath)
+    const video = await readFile(outputPath)
     await rm(resultPath, { force: true })
+    if (outputPath !== resultPath) await rm(outputPath, { force: true })
     return { mimeType: 'video/mp4', data: video.toString('base64') }
   } finally {
     await rm(videoPath, { force: true })
@@ -304,12 +311,15 @@ const server = createServer(async (request, response) => {
     const ltxResponse = await postJson(`${backendUrl}/api/generate`, { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, JSON.stringify({ prompt: body.prompt, negativePrompt: body.wantsHandMotion ? 'camera movement, zoom, dolly, pan, crop, reframing, scene change' : '', cameraMotion: body.wantsHandMotion ? 'none' : undefined, duration, resolution, model: 'fast', fps: 24, aspectRatio: body.aspectRatio, imagePath: filePath }))
     const result = JSON.parse(ltxResponse.body)
     if (ltxResponse.status < 200 || ltxResponse.status >= 300 || result.status !== 'complete' || !result.video_path) throw new Error(result.message || 'LTX rejected the generation request.')
-    const video = await readFile(result.video_path)
+    const outputPath = body.exportPreset === 'facebook-reel' ? path.join(uploadDirectory, `${randomUUID()}-facebook.mp4`) : result.video_path
+    if (body.exportPreset === 'facebook-reel') await normalizeFacebookVideo(result.video_path, outputPath)
+    const video = await readFile(outputPath)
     if (!body.hasMusic) {
       await mkdir(outputDirectory, { recursive: true })
-      await copyFile(result.video_path, path.join(outputDirectory, path.basename(result.video_path)))
+      await copyFile(outputPath, path.join(outputDirectory, body.exportPreset === 'facebook-reel' ? `facebook-reel-${Date.now()}.mp4` : path.basename(result.video_path)))
     }
     await rm(result.video_path, { force: true })
+    if (outputPath !== result.video_path) await rm(outputPath, { force: true })
     send(response, 200, { mimeType: 'video/mp4', data: video.toString('base64') })
   } catch (error) {
     await logError('generate', error)

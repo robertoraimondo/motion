@@ -44,7 +44,8 @@ function App() {
   const [prompt, setPrompt] = useState(examples[0].prompt)
   const [requestText, setRequestText] = useState('')
   const [duration, setDuration] = useState('5 sec')
-  const [aspect, setAspect] = useState('16:9')
+  const [aspect, setAspect] = useState('9:16')
+  const [exportPreset, setExportPreset] = useState('facebook-reel')
   const [status, setStatus] = useState<'idle' | 'connecting' | 'error'>('idle')
   const [generationMessage, setGenerationMessage] = useState('')
   const [generatedMedia, setGeneratedMedia] = useState<string | null>(null)
@@ -177,7 +178,7 @@ function App() {
     const response = await fetch('http://127.0.0.1:41955/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageData, hasMusic, wantsHandMotion, prompt: `${motionPrompt} Keep the father fully visible from head to body, with his entire head inside the frame. Do not crop, zoom in, or cut off the top of the head.`, duration: Number.parseInt(duration, 10), aspectRatio: aspect }),
+      body: JSON.stringify({ imageData, hasMusic, wantsHandMotion, exportPreset, prompt: `${motionPrompt} Keep the father fully visible from head to body, with his entire head inside the frame. Do not crop, zoom in, or cut off the top of the head.`, duration: Number.parseInt(duration, 10), aspectRatio: aspect }),
     })
     const result = await response.json() as { data?: string; mimeType?: string; message?: string }
     if (!response.ok || !result.data || !result.mimeType) throw new Error(result.message ?? `LTX request failed (${response.status}).`)
@@ -187,6 +188,13 @@ function App() {
 
   const generate = async () => {
     const selectedMusic = musicTrack
+    if (exportPreset === 'facebook-reel' && selectedModel.name !== 'LTX Video') {
+      setStatus('error')
+      setGeneratedMedia(null)
+      setGeneratedMediaIsVideo(false)
+      setGenerationMessage('Facebook Reel export uses LTX Video to create an exact 1080 × 1920 MP4. Select LTX Video first.')
+      return
+    }
     if (selectedModel.name === 'LTX Video' && !referenceImage) {
       setStatus('error')
       setGeneratedMedia(null)
@@ -314,7 +322,8 @@ function App() {
     setPrompt(examples[0].prompt)
     setSelectedModel(models[1])
     setDuration('5 sec')
-    setAspect('16:9')
+    setAspect('9:16')
+    setExportPreset('facebook-reel')
     setGeneratedMedia(null)
     setGeneratedMediaIsVideo(false)
     setReferenceImage((currentImage) => {
@@ -403,7 +412,7 @@ function App() {
       const response = await fetch('http://127.0.0.1:41955/extend', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ videoData: generatedMedia, duration: Number(extensionDuration), prompt, aspectRatio: aspect }),
+        body: JSON.stringify({ videoData: generatedMedia, duration: Number(extensionDuration), prompt, aspectRatio: aspect, exportPreset }),
       })
       const result = await response.json() as { data?: string; mimeType?: string; message?: string }
       if (!response.ok || !result.data || !result.mimeType) throw new Error(result.message ?? 'Unable to extend the video.')
@@ -432,7 +441,7 @@ function App() {
             <div className="request-card"><div className="prompt-top"><span className="prompt-label">YOUR REQUEST</span><span className="prompt-count">{requestText.length} / 500</span></div><textarea value={requestText} onChange={(event) => setRequestText(event.target.value)} maxLength={500} placeholder="Describe what should happen..." spellCheck={false} /><button className="magic-button" onClick={createPromptFromRequest}><Sparkles size={16} /> Create prompt</button></div>
             <div className="prompt-card"><div className="prompt-top"><span className="prompt-label">PROMPT</span><span className="prompt-count">{prompt.length} / 1,000</span></div><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} spellCheck={false} /><div className="prompt-bottom"><button className="magic-button" onClick={() => setPrompt(examples[Math.floor(Math.random() * examples.length)].prompt)}><WandSparkles size={16} /> Inspire me</button></div></div>
             <div className="music-control canvas-music-control"><input ref={musicInputRef} type="file" accept="audio/*" onChange={importMusic} /><button className="music-button" onClick={() => musicInputRef.current?.click()}><Music2 size={16} /> {musicTrack ? 'Change music' : 'Insert audio'}</button>{musicTrack && <><span title={musicTrack.name}>{musicTrack.name}</span><button className="remove-music" onClick={removeMusic} aria-label="Remove selected music" title="Remove music"><X size={14} /></button></>}</div>{musicTrack && !generatedMedia && <audio className="music-player" src={musicTrack.url} controls />}
-            <div className="controls"><label><span>MODEL</span><div className="select-control-wrap"><span className={`model-mark ${selectedModel.color}`}><Layers3 size={13} /></span><select className="select-control model-select" value={selectedModel.name} onChange={(event) => setSelectedModel(models.find((model) => model.name === event.target.value) ?? models[0])}>{models.map((model) => <option key={model.name} value={model.name} disabled={!model.installed}>{model.name}{model.installed ? '' : ' · not installed'}</option>)}</select><span className="select-chevron">⌄</span></div></label><label><span>DURATION</span><div className="select-control-wrap"><select className="select-control" value={duration} onChange={(event) => setDuration(event.target.value)}><option>3 sec</option><option>5 sec</option><option>8 sec</option><option>10 sec</option></select><span className="select-chevron">⌄</span></div></label><label><span>FORMAT</span><div className="select-control-wrap"><select className="select-control" value={aspect} onChange={(event) => setAspect(event.target.value)}><option>16:9</option><option>9:16</option><option>3:4</option><option>1:1</option></select><span className="select-chevron">⌄</span></div></label></div>
+            <div className="controls"><label><span>EXPORT PRESET</span><div className="select-control-wrap"><select className="select-control" value={exportPreset} onChange={(event) => { const nextPreset = event.target.value; setExportPreset(nextPreset); if (nextPreset === 'facebook-reel') { setAspect('9:16'); setDuration('5 sec') } }}><option value="facebook-reel">Facebook Reel · 1080 × 1920</option><option value="original">Original format</option></select><span className="select-chevron">⌄</span></div></label><label><span>MODEL</span><div className="select-control-wrap"><span className={`model-mark ${selectedModel.color}`}><Layers3 size={13} /></span><select className="select-control model-select" value={selectedModel.name} onChange={(event) => setSelectedModel(models.find((model) => model.name === event.target.value) ?? models[0])}>{models.map((model) => <option key={model.name} value={model.name} disabled={!model.installed}>{model.name}{model.installed ? '' : ' · not installed'}</option>)}</select><span className="select-chevron">⌄</span></div></label><label><span>DURATION</span><div className="select-control-wrap"><select className="select-control" value={duration} onChange={(event) => setDuration(event.target.value)}><option>3 sec</option><option>5 sec</option><option>8 sec</option><option>10 sec</option></select><span className="select-chevron">⌄</span></div></label><label><span>FORMAT</span><div className="select-control-wrap"><select className="select-control" value={aspect} onChange={(event) => setAspect(event.target.value)}><option>16:9</option><option>9:16</option><option>3:4</option><option>1:1</option></select><span className="select-chevron">⌄</span></div></label></div>
             <button className="generate-button" onClick={generate} disabled={status === 'connecting'}>{status === 'connecting' ? <><LoaderCircle className="spin" size={19} /> {selectedModel.name === 'LTX Video' ? 'Generating with LTX Desktop...' : 'Connecting to ComfyUI...'}</> : <><Sparkles size={18} /> Generate video <ArrowUpRight size={18} /></>}</button>
             {generationMessage && <p className={`generation-message ${status === 'error' ? 'error' : ''}`}>{generationMessage}</p>}
           </div>}
@@ -445,7 +454,7 @@ function App() {
           <div className="canvas-head"><div><p className="section-kicker">NEW PROJECT</p><h2>Describe your shot</h2></div><div className="canvas-actions"><button className="new-video-button" onClick={startNewVideo}><Plus size={15} /> New video</button><div className="import-control"><input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp" onChange={importImage} /><button className="text-button" onClick={() => fileInputRef.current?.click()}><Film size={16} /> {referenceImage ? 'Change image' : 'Import image'}</button>{referenceImage && <button className="remove-image" onClick={removeImage} aria-label="Remove imported image"><X size={14} /></button>}</div></div></div>
           <div className="media-grid">
             {referenceImage && <div className="reference-image"><img src={referenceImage} alt="Imported reference" /><span>REFERENCE IMAGE</span></div>}
-            <section className="center-preview"><div className="preview-head"><span>PREVIEW</span><span className="render-status"><i /> {generatedMedia ? 'Complete' : status === 'connecting' ? 'Rendering' : 'Ready'}</span></div><div className="preview-frame">{generatedMedia ? generatedMediaIsVideo ? <video className="generated-video" src={generatedMedia} controls autoPlay loop /> : <img className="generated-video" src={generatedMedia} alt="Generated video preview" /> : <><div className="preview-grid" /><div className="preview-placeholder"><div className="play-ring"><Play size={17} fill="currentColor" /></div><span>Your next shot<br /><b>will live here</b></span></div><span className="frame-corner top-left" /><span className="frame-corner top-right" /><span className="frame-corner bottom-left" /><span className="frame-corner bottom-right" /></>}</div>{generatedMedia && <div className="preview-actions"><a className="download-button" href={generatedMedia} download="motion-render.mp4" title="Download video"><Download size={16} /> Download video</a><div className="extend-control"><select value={extensionDuration} onChange={(event) => setExtensionDuration(event.target.value)} aria-label="Additional video duration"><option value="5">+5 sec</option><option value="10">+10 sec</option><option value="20">+20 sec</option></select><button className="extend-button" onClick={extendGeneratedVideo} disabled={status === 'connecting'}>Extend</button></div><button className="delete-button" onClick={removeVideo} title="Delete video"><Trash2 size={16} /> Delete</button></div>}<div className="preview-note"><Gauge size={15} /><span>Rendered locally on your GPU</span></div></section>
+            <section className="center-preview"><div className="preview-head"><span>PREVIEW</span><span className="render-status"><i /> {generatedMedia ? 'Complete' : status === 'connecting' ? 'Rendering' : 'Ready'}</span></div><div className={`preview-frame ${aspect === '9:16' ? 'portrait-preview' : ''}`} style={{ aspectRatio: aspect === '9:16' ? '9 / 16' : '16 / 9' }}>{generatedMedia ? generatedMediaIsVideo ? <video className="generated-video" src={generatedMedia} controls autoPlay loop /> : <img className="generated-video" src={generatedMedia} alt="Generated video preview" /> : <><div className="preview-grid" /><div className="preview-placeholder"><div className="play-ring"><Play size={17} fill="currentColor" /></div><span>Your next shot<br /><b>will live here</b></span></div><span className="frame-corner top-left" /><span className="frame-corner top-right" /><span className="frame-corner bottom-left" /><span className="frame-corner bottom-right" /></>}</div>{generatedMedia && <div className="preview-actions"><a className="download-button" href={generatedMedia} download={exportPreset === 'facebook-reel' ? 'facebook-reel-1080x1920.mp4' : 'motion-render.mp4'} title="Download video"><Download size={16} /> Download {exportPreset === 'facebook-reel' ? 'Facebook video' : 'video'}</a><div className="extend-control"><select value={extensionDuration} onChange={(event) => setExtensionDuration(event.target.value)} aria-label="Additional video duration"><option value="5">+5 sec</option><option value="10">+10 sec</option><option value="20">+20 sec</option></select><button className="extend-button" onClick={extendGeneratedVideo} disabled={status === 'connecting'}>Extend</button></div><button className="delete-button" onClick={removeVideo} title="Delete video"><Trash2 size={16} /> Delete</button></div>}<div className="preview-note"><Gauge size={15} /><span>{exportPreset === 'facebook-reel' ? 'Facebook Reel · 1080 × 1920 · MP4' : 'Rendered locally on your GPU'}</span></div></section>
           </div>
         </div>
 

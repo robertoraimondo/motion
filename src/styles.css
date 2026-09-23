@@ -44,6 +44,7 @@ footer { border-top: 1px solid var(--line); padding: 20px 5vw; display: flex; ju
 .media-grid .reference-image { height: auto; min-height: 0; aspect-ratio: 16 / 9; margin: 28px 0 0; }
 .center-preview { width: 100%; min-width: 0; margin: 0; padding: 0; border-top: 0; display: flex; flex-direction: column; }
 .center-preview .preview-frame { height: auto; min-height: 0; flex: none; aspect-ratio: 16 / 9; margin-top: 14px; }
+.center-preview .preview-frame.portrait-preview { width: min(100%, 360px); margin-inline: auto; }
 .center-preview .preview-note { margin-bottom: 0; }
 @media (max-width: 1050px) { .workspace { grid-template-columns: minmax(280px, 320px) minmax(0, 1fr); } }
 @media (max-width: 700px) { .workspace { display: block; height: auto; overflow: visible; }.canvas-area { padding: 30px 22px 38px; overflow: visible; }.media-grid { grid-template-columns: 1fr; max-height: none; }.media-grid .reference-image { min-height: 0; aspect-ratio: 16 / 9; }.center-preview .preview-frame { height: 240px; min-height: 0; } }
