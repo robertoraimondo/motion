@@ -14,7 +14,6 @@ import {
   Settings2,
   Sparkles,
   Trash2,
-  WandSparkles,
   X,
 } from 'lucide-react'
 
@@ -33,36 +32,63 @@ const models: Model[] = [
   { name: 'LTX Video', maker: 'Lightricks · LTX Desktop detected', tag: 'LOCAL READY', memory: '16 GB+', detail: 'Image-to-video via local LTX Desktop', color: 'blue', installed: true },
 ]
 
-const examples = [
-  { label: 'Hand wave', prompt: 'The father gently waves with his raised hand to his children. Keep the camera completely still, with natural facial movement and a warm sunset mood.' },
-  { label: 'Portrait study', prompt: 'Close-up portrait of an elderly sailor by a window, soft morning light, subtle breathing and eye movement' },
-  { label: 'Desert wind', prompt: 'A lone traveler crosses a red desert at golden hour, fabric moving in the wind, wide cinematic shot' },
-]
+
+
+const exportPresets: Record<string, { label: string; aspect: string; width: number; height: number }> = {
+  'facebook-feed': { label: 'Facebook Feed · 1080 × 1350', aspect: '4:5', width: 1080, height: 1350 },
+  'facebook-reel': { label: 'Facebook Reel / Story · 1080 × 1920', aspect: '9:16', width: 1080, height: 1920 },
+  'facebook-landscape': { label: 'Facebook Landscape · 1920 × 1080', aspect: '16:9', width: 1920, height: 1080 },
+  original: { label: 'Original format', aspect: '16:9', width: 0, height: 0 },
+}
 
 function App() {
   const [selectedModel, setSelectedModel] = useState(models[1])
-  const [prompt, setPrompt] = useState(examples[0].prompt)
-  const [requestText, setRequestText] = useState('')
+  const [prompt, setPrompt] = useState('')
   const [duration, setDuration] = useState('5 sec')
   const [aspect, setAspect] = useState('9:16')
   const [exportPreset, setExportPreset] = useState('facebook-reel')
   const [status, setStatus] = useState<'idle' | 'connecting' | 'error'>('idle')
   const [generationMessage, setGenerationMessage] = useState('')
+  const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null)
+  const [generationElapsedSeconds, setGenerationElapsedSeconds] = useState(0)
   const [generatedMedia, setGeneratedMedia] = useState<string | null>(null)
   const [generatedMediaIsVideo, setGeneratedMediaIsVideo] = useState(false)
   const [extensionDuration, setExtensionDuration] = useState('5')
   const [referenceImage, setReferenceImage] = useState<string | null>(null)
   const [referenceFile, setReferenceFile] = useState<File | null>(null)
   const [musicTrack, setMusicTrack] = useState<{ name: string; url: string; file: File } | null>(null)
+  const [musicDurationSeconds, setMusicDurationSeconds] = useState(0)
+  const [musicTrimStartSeconds, setMusicTrimStartSeconds] = useState(0)
   const [activeView, setActiveView] = useState<'studio' | 'settings'>('studio')
   const [gpuName, setGpuName] = useState('GPU detected locally')
   const [vramTotalMb, setVramTotalMb] = useState(0)
   const [vramUsedMb, setVramUsedMb] = useState<number | null>(null)
+  const [fanSpeedPercent, setFanSpeedPercent] = useState<number | null>(null)
+  const [gpuTemperatureC, setGpuTemperatureC] = useState<number | null>(null)
   const [topMenu, setTopMenu] = useState<'help' | 'account' | null>(null)
   const [outputDirectory, setOutputDirectory] = useState('D:\\Videos\\videocreation\\outputs')
   const [settingsMessage, setSettingsMessage] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const musicInputRef = useRef<HTMLInputElement>(null)
+  const musicPreviewRef = useRef<HTMLAudioElement>(null)
+  const cancelRequestedRef = useRef(false)
+  const generationControllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    if (status !== 'connecting' || generationStartedAt === null) return
+    const updateElapsed = () => setGenerationElapsedSeconds(Math.floor((Date.now() - generationStartedAt) / 1000))
+    updateElapsed()
+    const interval = window.setInterval(updateElapsed, 1000)
+    return () => window.clearInterval(interval)
+  }, [status, generationStartedAt])
+
+  const estimatedRenderSeconds = selectedModel.name === 'LTX Video'
+    ? 75 + Number.parseInt(duration, 10) * 12
+    : 120 + Number.parseInt(duration, 10) * 20
+  const renderProgress = status === 'connecting' ? Math.min(95, Math.max(3, Math.round((generationElapsedSeconds / estimatedRenderSeconds) * 100))) : generatedMedia ? 100 : 0
+  const remainingSeconds = Math.max(0, estimatedRenderSeconds - generationElapsedSeconds)
+  const canStopGeneration = status === 'connecting' || (status === 'error' && /generation already in progress/i.test(generationMessage))
+  const formatTime = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 
   useEffect(() => {
     const canvas = document.createElement('canvas')
@@ -79,17 +105,20 @@ function App() {
     let cancelled = false
     const loadSystemInfo = async () => {
       try {
-        const system = await fetch('http://127.0.0.1:41955/system').then((response) => response.json() as Promise<{ gpuName?: string; vramTotalMb?: number; vramUsedMb?: number | null }>)
+        const system = await fetch('http://127.0.0.1:41955/system').then((response) => response.json() as Promise<{ gpuName?: string; vramTotalMb?: number; vramUsedMb?: number | null; fanSpeedPercent?: number | null; gpuTemperatureC?: number | null }> )
         if (cancelled) return
         if (system.gpuName) setGpuName(system.gpuName)
         if (system.vramTotalMb) setVramTotalMb(system.vramTotalMb)
         setVramUsedMb(system.vramUsedMb ?? null)
+        setFanSpeedPercent(Number.isFinite(system.fanSpeedPercent) ? system.fanSpeedPercent ?? null : null)
+        setGpuTemperatureC(Number.isFinite(system.gpuTemperatureC) ? system.gpuTemperatureC ?? null : null)
       } catch {
         // The bridge may still be starting; WebGL remains the visible fallback.
       }
     }
     void loadSystemInfo()
-    return () => { cancelled = true }
+    const interval = window.setInterval(() => void loadSystemInfo(), 2000)
+    return () => { cancelled = true; window.clearInterval(interval) }
   }, [])
 
   useEffect(() => {
@@ -126,8 +155,8 @@ function App() {
       image.onload = () => resolve()
       image.onerror = () => reject(new Error('Unable to read the reference image.'))
     })
-    const [targetWidth, targetHeight] = targetAspect === '9:16' ? [1088, 1920] : [1920, 1088]
-    const scale = Math.min(targetWidth / image.naturalWidth, targetHeight / image.naturalHeight)
+    const [targetWidth, targetHeight] = targetAspect === '9:16' ? [704, 1280] : [1280, 704]
+    const scale = Math.max(targetWidth / image.naturalWidth, targetHeight / image.naturalHeight)
     const canvas = document.createElement('canvas')
     canvas.width = targetWidth
     canvas.height = targetHeight
@@ -142,43 +171,22 @@ function App() {
     return canvas.toDataURL('image/png')
   }
 
-  const createPromptFromRequest = () => {
-    const request = requestText.trim()
-    if (!request) {
-      setGenerationMessage('Write what should happen in the video first.')
-      return
-    }
-    const normalizedRequest = request.toLowerCase()
-    const actions = [
-      { matches: ['bacio', 'bacia', 'kiss'], text: 'The person gently smiles and sends a loving kiss toward the camera.' },
-      { matches: ['saluta', 'salutare', 'wave'], text: 'The person gently raises one hand and waves slowly toward the camera.' },
-      { matches: ['sorride', 'sorriso', 'smile'], text: 'The person smiles warmly and naturally.' },
-      { matches: ['abbraccia', 'abbraccio', 'hug'], text: 'The people share a gentle, affectionate embrace.' },
-      { matches: ['guarda', 'occhi', 'look'], text: 'The people look lovingly into each other\'s eyes.' },
-      { matches: ['cane', 'cagnolina', 'dotty', 'dog'], text: 'The dog looks affectionately at the person and makes a small, natural movement.' },
-      { matches: ['scala', 'scale', 'stairs'], text: 'The person moves naturally on the stairs while keeping the original composition believable.' },
-    ]
-    const selectedActions = actions.filter((action) => action.matches.some((match) => normalizedRequest.includes(match))).map((action) => action.text)
-    const actionText = selectedActions.length > 0 ? selectedActions.join(' ') : 'Add subtle natural movement and a gentle, heartfelt expression.'
-    const memorialText = ['mancata', 'scomparsa', 'non c\'è più', 'non c\'e piu', 'memoria', 'ricordo'].some((match) => normalizedRequest.includes(match))
-      ? 'Treat this as a respectful living memory: preserve the person\'s identity and dignity, with no ghost effect, supernatural elements, or changes to facial features.'
-      : ''
-    setPrompt(`Create a tender, photorealistic memory from the reference image. ${request}. ${actionText} ${memorialText} Preserve every person\'s identity, face, age, hairstyle, clothing, body proportions, and the original background exactly. Add only natural blinking, breathing, small head and hand movements, and gentle movement in clothing and hair. Keep the camera locked and the composition unchanged. Smooth, respectful, emotionally warm animation. No zoom, no camera movement, no scene change.`.slice(0, 1000))
-    setGenerationMessage('Prompt created from your request.')
-  }
-
   const generateWithLtx = async (hasMusic = false) => {
     if (!referenceFile) throw new Error('Import an image before starting I2V.')
-    if (!['16:9', '9:16'].includes(aspect)) throw new Error('LTX local I2V supports 16:9 and 9:16 only.')
-    const imageData = await prepareReferenceImage(referenceFile, aspect)
+    const generationAspect = exportPreset === 'facebook-feed' || aspect === '4:5' ? '9:16' : aspect
+    if (!['16:9', '9:16'].includes(generationAspect)) throw new Error('LTX local I2V supports 16:9 and 9:16 only.')
+    const imageData = await prepareReferenceImage(referenceFile, generationAspect)
     const wantsHandMotion = /mano|hand|wave|waving|salut/i.test(prompt)
     const motionPrompt = wantsHandMotion
       ? `${prompt}. Animate the raised hand slowly waving from side to side. Keep the camera locked and static: no zoom, no dolly, no pan, no crop, and no reframing.`
       : prompt
+    const controller = new AbortController()
+    generationControllerRef.current = controller
     const response = await fetch('http://127.0.0.1:41955/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageData, hasMusic, wantsHandMotion, exportPreset, prompt: `${motionPrompt} Keep the father fully visible from head to body, with his entire head inside the frame. Do not crop, zoom in, or cut off the top of the head.`, duration: Number.parseInt(duration, 10), aspectRatio: aspect }),
+      body: JSON.stringify({ imageData, hasMusic, wantsHandMotion, exportPreset, prompt: motionPrompt, duration: Number.parseInt(duration, 10), aspectRatio: generationAspect }),
+      signal: controller.signal,
     })
     const result = await response.json() as { data?: string; mimeType?: string; message?: string }
     if (!response.ok || !result.data || !result.mimeType) throw new Error(result.message ?? `LTX request failed (${response.status}).`)
@@ -188,11 +196,11 @@ function App() {
 
   const generate = async () => {
     const selectedMusic = musicTrack
-    if (exportPreset === 'facebook-reel' && selectedModel.name !== 'LTX Video') {
+    if (exportPreset.startsWith('facebook-') && selectedModel.name !== 'LTX Video') {
       setStatus('error')
       setGeneratedMedia(null)
       setGeneratedMediaIsVideo(false)
-      setGenerationMessage('Facebook Reel export uses LTX Video to create an exact 1080 × 1920 MP4. Select LTX Video first.')
+      setGenerationMessage('Facebook export uses LTX Video to create the selected format. Select LTX Video first.')
       return
     }
     if (selectedModel.name === 'LTX Video' && !referenceImage) {
@@ -210,7 +218,10 @@ function App() {
       return
     }
     if (referenceImage && selectedModel.name === 'LTX Video') {
+      cancelRequestedRef.current = false
       setStatus('connecting')
+      setGenerationStartedAt(Date.now())
+      setGenerationElapsedSeconds(0)
       setGeneratedMedia(null)
       setGeneratedMediaIsVideo(false)
       setGenerationMessage('Generating with LTX Desktop I2V...')
@@ -223,6 +234,12 @@ function App() {
         setStatus('idle')
         setGenerationMessage('Video ready.')
       } catch (error) {
+        if (cancelRequestedRef.current) {
+          cancelRequestedRef.current = false
+          setStatus('idle')
+          setGenerationMessage('Video generation cancelled.')
+          return
+        }
         setStatus('error')
         setGenerationMessage(error instanceof Error ? error.message : 'Unable to reach LTX Desktop.')
       }
@@ -234,6 +251,8 @@ function App() {
       return
     }
     setStatus('connecting')
+    setGenerationStartedAt(Date.now())
+    setGenerationElapsedSeconds(0)
     setGeneratedMedia(null)
     setGeneratedMediaIsVideo(false)
     setGenerationMessage('Connecting to ComfyUI...')
@@ -257,6 +276,7 @@ function App() {
       setGenerationMessage('Rendering locally. This can take a few minutes...')
       for (let attempt = 0; attempt < 180; attempt += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 2000))
+        if (cancelRequestedRef.current) throw new Error('Generation cancelled by user.')
         const history = await fetch(`http://127.0.0.1:8188/history/${result.prompt_id}`).then((item) => item.json())
         const outputs = history[result.prompt_id]?.outputs ?? {}
         const outputNodes = [outputs['47'], outputs['28']].filter(Boolean)
@@ -315,11 +335,13 @@ function App() {
       if (currentTrack) URL.revokeObjectURL(currentTrack.url)
       return null
     })
+    setMusicDurationSeconds(0)
+    setMusicTrimStartSeconds(0)
     setGenerationMessage('Audio removed. The next video will use speech only.')
   }
 
   const startNewVideo = () => {
-    setPrompt(examples[0].prompt)
+    setPrompt('')
     setSelectedModel(models[1])
     setDuration('5 sec')
     setAspect('9:16')
@@ -335,6 +357,8 @@ function App() {
       if (currentTrack) URL.revokeObjectURL(currentTrack.url)
       return null
     })
+    setMusicDurationSeconds(0)
+    setMusicTrimStartSeconds(0)
     if (fileInputRef.current) fileInputRef.current.value = ''
     if (musicInputRef.current) musicInputRef.current.value = ''
     setGenerationMessage('New video ready.')
@@ -379,11 +403,15 @@ function App() {
       if (currentTrack) URL.revokeObjectURL(currentTrack.url)
       return { name: file.name, url: URL.createObjectURL(file), file }
     })
+    setMusicDurationSeconds(0)
+    setMusicTrimStartSeconds(0)
     setGeneratedMedia(null)
     setGeneratedMediaIsVideo(false)
     setGenerationMessage('Audio selected. Generate the video to embed it.')
     event.target.value = ''
   }
+
+  const formatMusicTime = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`
 
   const fileToDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
@@ -397,7 +425,7 @@ function App() {
     const response = await fetch('http://127.0.0.1:41955/mix', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audioData: await fileToDataUrl(track.file), ...(videoUrl.startsWith('data:') ? { videoData: videoUrl } : { videoUrl }) }),
+      body: JSON.stringify({ audioData: await fileToDataUrl(track.file), trimStart: musicTrimStartSeconds, ...(videoUrl.startsWith('data:') ? { videoData: videoUrl } : { videoUrl }) }),
     })
     const result = await response.json() as { data?: string; mimeType?: string; message?: string }
     if (!response.ok || !result.data || !result.mimeType) throw new Error(result.message ?? 'Unable to add music to the video.')
@@ -406,7 +434,10 @@ function App() {
 
   const extendGeneratedVideo = async () => {
     if (!generatedMedia || !generatedMediaIsVideo) return
+    cancelRequestedRef.current = false
     setStatus('connecting')
+    setGenerationStartedAt(Date.now())
+    setGenerationElapsedSeconds(0)
     setGenerationMessage('Extending the video locally...')
     try {
       const response = await fetch('http://127.0.0.1:41955/extend', {
@@ -418,13 +449,49 @@ function App() {
       if (!response.ok || !result.data || !result.mimeType) throw new Error(result.message ?? 'Unable to extend the video.')
       const extendedMedia = `data:${result.mimeType};base64,${result.data}`
       setGenerationMessage(musicTrack ? 'Adding music to the extended video...' : 'Video extended.')
-      setGeneratedMedia(await mixVideoWithMusic(extendedMedia, musicTrack))
+    setGeneratedMedia(await mixVideoWithMusic(extendedMedia, musicTrack))
       setStatus('idle')
       setGenerationMessage('Video extended.')
     } catch (error) {
+      if (cancelRequestedRef.current) {
+        cancelRequestedRef.current = false
+        setStatus('idle')
+        setGenerationMessage('Video extension cancelled.')
+        return
+      }
       setStatus('error')
       setGenerationMessage(error instanceof Error ? error.message : 'Unable to extend the video.')
     }
+  }
+
+  const cancelGeneration = async () => {
+    if (!canStopGeneration) return
+    const clearingBusyState = status === 'error'
+    cancelRequestedRef.current = true
+    setGenerationMessage('Stopping generation...')
+    generationControllerRef.current?.abort()
+    try {
+      const response = await fetch('http://127.0.0.1:41955/cancel', { method: 'POST' })
+      if (!response.ok) throw new Error('The local video service did not accept the stop request.')
+      if (clearingBusyState) {
+        setStatus('idle')
+        setGenerationStartedAt(null)
+        setGenerationMessage('Stop request sent to the active render.')
+      }
+    } catch (error) {
+      if (clearingBusyState) {
+        setStatus('idle')
+        setGenerationStartedAt(null)
+        setGenerationMessage(error instanceof Error ? error.message : 'Unable to stop the active render.')
+      }
+    }
+    try { await fetch('http://127.0.0.1:8188/interrupt', { method: 'POST' }) } catch { /* ComfyUI may not be running. */ }
+  }
+
+  const updateMusicTrimStart = (start: number) => {
+    setMusicTrimStartSeconds(start)
+    const audio = musicPreviewRef.current
+    if (audio) audio.currentTime = start
   }
 
   return (
@@ -432,29 +499,28 @@ function App() {
       <nav className="topbar">
         <div className="brand" aria-label="motion"><span>mo</span>tion<span className="brand-dot">.</span></div>
         <div className="nav-links"><button className="active" onClick={() => setActiveView('studio')}>Studio</button></div>
-        <div className="top-actions"><span className="local-pill" title="All generation stays on this computer"><i /> Local mode</span><button className="settings-top-button" onClick={() => setActiveView('settings')}><Settings2 size={15} /> Settings</button><div className="top-menu-wrap"><button className="icon-button" aria-label="Help" aria-expanded={topMenu === 'help'} onClick={() => setTopMenu((current) => current === 'help' ? null : 'help')}><CircleHelp size={18} /></button>{topMenu === 'help' && <div className="top-menu"><strong>Local studio</strong><span>Generation, media and audio stay on this computer.</span></div>}</div><div className="top-menu-wrap"><button className="avatar" aria-label="Account" aria-expanded={topMenu === 'account'} onClick={() => setTopMenu((current) => current === 'account' ? null : 'account')}>R</button>{topMenu === 'account' && <div className="top-menu account-menu"><strong>Local account</strong><span>R</span></div>}</div></div>
+        <div className="top-actions"><div className="top-gpu-status" title={gpuName}><span className="green-dot" /> <strong>GPU ready</strong><span>·</span><span className="top-gpu-name">{gpuName}</span><span>·</span><span>{vramUsedMb !== null && vramTotalMb > 0 ? `${(vramUsedMb / 1024).toFixed(1)} / ${(vramTotalMb / 1024).toFixed(1)} GB VRAM` : '-- / -- GB VRAM'}</span><span>·</span><span>{fanSpeedPercent !== null ? `fan ${fanSpeedPercent}%` : 'fan --'}</span><span>·</span><span>{gpuTemperatureC !== null ? `${gpuTemperatureC} °C` : '-- °C'}</span></div><span className="local-pill" title="All generation stays on this computer"><i /> Local mode</span><button className="settings-top-button" onClick={() => setActiveView('settings')}><Settings2 size={15} /> Settings</button><div className="top-menu-wrap"><button className="icon-button" aria-label="Help" aria-expanded={topMenu === 'help'} onClick={() => setTopMenu((current) => current === 'help' ? null : 'help')}><CircleHelp size={18} /></button>{topMenu === 'help' && <div className="top-menu"><strong>Local studio</strong><span>Generation, media and audio stay on this computer.</span></div>}</div><div className="top-menu-wrap"><button className="avatar" aria-label="Account" aria-expanded={topMenu === 'account'} onClick={() => setTopMenu((current) => current === 'account' ? null : 'account')}>R</button>{topMenu === 'account' && <div className="top-menu account-menu"><strong>Local account</strong><span>R</span></div>}</div></div>
       </nav>
 
       <section className="workspace">
         <aside className="sidebar">
           {activeView === 'studio' && <div className="studio-controls">
-            <div className="request-card"><div className="prompt-top"><span className="prompt-label">YOUR REQUEST</span><span className="prompt-count">{requestText.length} / 500</span></div><textarea value={requestText} onChange={(event) => setRequestText(event.target.value)} maxLength={500} placeholder="Describe what should happen..." spellCheck={false} /><button className="magic-button" onClick={createPromptFromRequest}><Sparkles size={16} /> Create prompt</button></div>
-            <div className="prompt-card"><div className="prompt-top"><span className="prompt-label">PROMPT</span><span className="prompt-count">{prompt.length} / 1,000</span></div><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} spellCheck={false} /><div className="prompt-bottom"><button className="magic-button" onClick={() => setPrompt(examples[Math.floor(Math.random() * examples.length)].prompt)}><WandSparkles size={16} /> Inspire me</button></div></div>
-            <div className="music-control canvas-music-control"><input ref={musicInputRef} type="file" accept="audio/*" onChange={importMusic} /><button className="music-button" onClick={() => musicInputRef.current?.click()}><Music2 size={16} /> {musicTrack ? 'Change music' : 'Insert audio'}</button>{musicTrack && <><span title={musicTrack.name}>{musicTrack.name}</span><button className="remove-music" onClick={removeMusic} aria-label="Remove selected music" title="Remove music"><X size={14} /></button></>}</div>{musicTrack && !generatedMedia && <audio className="music-player" src={musicTrack.url} controls />}
-            <div className="controls"><label><span>EXPORT PRESET</span><div className="select-control-wrap"><select className="select-control" value={exportPreset} onChange={(event) => { const nextPreset = event.target.value; setExportPreset(nextPreset); if (nextPreset === 'facebook-reel') { setAspect('9:16'); setDuration('5 sec') } }}><option value="facebook-reel">Facebook Reel · 1080 × 1920</option><option value="original">Original format</option></select><span className="select-chevron">⌄</span></div></label><label><span>MODEL</span><div className="select-control-wrap"><span className={`model-mark ${selectedModel.color}`}><Layers3 size={13} /></span><select className="select-control model-select" value={selectedModel.name} onChange={(event) => setSelectedModel(models.find((model) => model.name === event.target.value) ?? models[0])}>{models.map((model) => <option key={model.name} value={model.name} disabled={!model.installed}>{model.name}{model.installed ? '' : ' · not installed'}</option>)}</select><span className="select-chevron">⌄</span></div></label><label><span>DURATION</span><div className="select-control-wrap"><select className="select-control" value={duration} onChange={(event) => setDuration(event.target.value)}><option>3 sec</option><option>5 sec</option><option>8 sec</option><option>10 sec</option></select><span className="select-chevron">⌄</span></div></label><label><span>FORMAT</span><div className="select-control-wrap"><select className="select-control" value={aspect} onChange={(event) => setAspect(event.target.value)}><option>16:9</option><option>9:16</option><option>3:4</option><option>1:1</option></select><span className="select-chevron">⌄</span></div></label></div>
-            <button className="generate-button" onClick={generate} disabled={status === 'connecting'}>{status === 'connecting' ? <><LoaderCircle className="spin" size={19} /> {selectedModel.name === 'LTX Video' ? 'Generating with LTX Desktop...' : 'Connecting to ComfyUI...'}</> : <><Sparkles size={18} /> Generate video <ArrowUpRight size={18} /></>}</button>
+            <div className="prompt-card"><div className="prompt-top"><span className="prompt-label">PROMPT</span><span className="prompt-count">{prompt.length} / 1,000</span></div><textarea value={prompt} onChange={(event) => setPrompt(event.target.value.slice(0, 1000))} maxLength={1000} spellCheck={false} aria-label="Video prompt" /></div>
+            <div className="music-control canvas-music-control"><input ref={musicInputRef} type="file" accept="audio/*" onChange={importMusic} /><button className="music-button" onClick={() => musicInputRef.current?.click()}><Music2 size={16} /> {musicTrack ? 'Change music' : 'Insert audio'}</button>{musicTrack && <><span title={musicTrack.name}>{musicTrack.name}</span><button className="remove-music" onClick={removeMusic} aria-label="Remove selected music" title="Remove music"><X size={14} /></button></>}</div>{musicTrack && <><div className="music-trim-control"><label><span>START · {formatMusicTime(musicTrimStartSeconds)}</span><input type="range" min="0" max={Math.max(0, musicDurationSeconds - 1)} step="1" value={Math.min(musicTrimStartSeconds, Math.max(0, musicDurationSeconds - 1))} disabled={!musicDurationSeconds} onChange={(event) => updateMusicTrimStart(Number(event.target.value))} /></label></div><small className="music-trim-hint">Choose where the music starts; it plays to the end of the video.</small><audio ref={musicPreviewRef} className="music-player" src={musicTrack.url} controls onLoadedMetadata={(event) => { const trackDuration = Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0; setMusicDurationSeconds(trackDuration) }} onPlay={(event) => { const audio = event.currentTarget; if (audio.currentTime < musicTrimStartSeconds) audio.currentTime = musicTrimStartSeconds }} /></>}
+            <div className="controls"><label><span>EXPORT PRESET</span><div className="select-control-wrap"><select className="select-control" value={exportPreset} onChange={(event) => { const nextPreset = event.target.value; setExportPreset(nextPreset); setAspect(exportPresets[nextPreset].aspect); if (nextPreset.startsWith('facebook-')) setDuration('5 sec') }}>{Object.entries(exportPresets).map(([value, preset]) => <option key={value} value={value}>{preset.label}</option>)}</select><span className="select-chevron">⌄</span></div></label><label><span>MODEL</span><div className="select-control-wrap"><span className={`model-mark ${selectedModel.color}`}><Layers3 size={13} /></span><select className="select-control model-select" value={selectedModel.name} onChange={(event) => setSelectedModel(models.find((model) => model.name === event.target.value) ?? models[0])}>{models.map((model) => <option key={model.name} value={model.name} disabled={!model.installed}>{model.name}{model.installed ? '' : ' · not installed'}</option>)}</select><span className="select-chevron">⌄</span></div></label><label><span>DURATION</span><div className="select-control-wrap"><select className="select-control" value={duration} onChange={(event) => setDuration(event.target.value)}><option>3 sec</option><option>5 sec</option><option>8 sec</option><option>10 sec</option></select><span className="select-chevron">⌄</span></div></label><label><span>FORMAT</span><div className="select-control-wrap"><select className="select-control" value={aspect} onChange={(event) => setAspect(event.target.value)}><option>16:9</option><option>9:16</option><option>4:5</option><option>3:4</option><option>1:1</option></select><span className="select-chevron">⌄</span></div></label></div>
             {generationMessage && <p className={`generation-message ${status === 'error' ? 'error' : ''}`}>{generationMessage}</p>}
+            {canStopGeneration && <button className="cancel-render-button" onClick={cancelGeneration}><X size={14} /> Stop generation</button>}
+            {status === 'connecting' && <div className="render-progress" aria-live="polite"><div className="render-progress-top"><span>RENDERING {renderProgress}%</span><span>ETA ~{formatTime(remainingSeconds)}</span></div><div className="render-progress-track"><span style={{ width: `${renderProgress}%` }} /></div><div className="render-progress-bottom"><span>Elapsed {formatTime(generationElapsedSeconds)}</span><span>Estimate updates live</span></div></div>}
           </div>}
           <div className="side-divider" />
-          <div className="side-footer"><div className="gpu-label"><span className="green-dot" /> GPU ready</div><p title={gpuName}>{gpuName}</p><small>{vramTotalMb > 0 ? `${(vramTotalMb / 1024).toFixed(1)} GB VRAM${vramUsedMb !== null ? ` · ${(vramUsedMb / 1024).toFixed(1)} GB in use` : ''}` : 'VRAM detection unavailable'}</small></div>
         </aside>
 
         {activeView === 'settings' && <div className="utility-panel"><div className="utility-head"><div><p className="section-kicker">PREFERENCES</p><h2>Settings</h2></div><button className="text-button" onClick={() => setActiveView('studio')}>Back to Studio</button></div><div className="settings-list"><label><span>ENGINE</span><strong>Local GPU rendering</strong></label><label className="settings-path"><span>VIDEO OUTPUT</span><div><div className="path-controls"><input value={outputDirectory} onChange={(event) => setOutputDirectory(event.target.value)} aria-label="Video output directory" /><button className="pick-directory" onClick={pickOutputDirectory}><FolderOpen size={14} /> Browse</button></div><button className="save-settings" onClick={saveSettings}>Save path</button>{settingsMessage && <small>{settingsMessage}</small>}</div></label><label><span>ACTIVE MODEL</span><strong>{selectedModel.name}</strong></label></div></div>}
         <div className="canvas-area">
           <div className="canvas-head"><div><p className="section-kicker">NEW PROJECT</p><h2>Describe your shot</h2></div><div className="canvas-actions"><button className="new-video-button" onClick={startNewVideo}><Plus size={15} /> New video</button><div className="import-control"><input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp" onChange={importImage} /><button className="text-button" onClick={() => fileInputRef.current?.click()}><Film size={16} /> {referenceImage ? 'Change image' : 'Import image'}</button>{referenceImage && <button className="remove-image" onClick={removeImage} aria-label="Remove imported image"><X size={14} /></button>}</div></div></div>
           <div className="media-grid">
-            {referenceImage && <div className="reference-image"><img src={referenceImage} alt="Imported reference" /><span>REFERENCE IMAGE</span></div>}
-            <section className="center-preview"><div className="preview-head"><span>PREVIEW</span><span className="render-status"><i /> {generatedMedia ? 'Complete' : status === 'connecting' ? 'Rendering' : 'Ready'}</span></div><div className={`preview-frame ${aspect === '9:16' ? 'portrait-preview' : ''}`} style={{ aspectRatio: aspect === '9:16' ? '9 / 16' : '16 / 9' }}>{generatedMedia ? generatedMediaIsVideo ? <video className="generated-video" src={generatedMedia} controls autoPlay loop /> : <img className="generated-video" src={generatedMedia} alt="Generated video preview" /> : <><div className="preview-grid" /><div className="preview-placeholder"><div className="play-ring"><Play size={17} fill="currentColor" /></div><span>Your next shot<br /><b>will live here</b></span></div><span className="frame-corner top-left" /><span className="frame-corner top-right" /><span className="frame-corner bottom-left" /><span className="frame-corner bottom-right" /></>}</div>{generatedMedia && <div className="preview-actions"><a className="download-button" href={generatedMedia} download={exportPreset === 'facebook-reel' ? 'facebook-reel-1080x1920.mp4' : 'motion-render.mp4'} title="Download video"><Download size={16} /> Download {exportPreset === 'facebook-reel' ? 'Facebook video' : 'video'}</a><div className="extend-control"><select value={extensionDuration} onChange={(event) => setExtensionDuration(event.target.value)} aria-label="Additional video duration"><option value="5">+5 sec</option><option value="10">+10 sec</option><option value="20">+20 sec</option></select><button className="extend-button" onClick={extendGeneratedVideo} disabled={status === 'connecting'}>Extend</button></div><button className="delete-button" onClick={removeVideo} title="Delete video"><Trash2 size={16} /> Delete</button></div>}<div className="preview-note"><Gauge size={15} /><span>{exportPreset === 'facebook-reel' ? 'Facebook Reel · 1080 × 1920 · MP4' : 'Rendered locally on your GPU'}</span></div></section>
+            {referenceImage && <div className="reference-column"><div className="reference-image"><img src={referenceImage} alt="Imported reference" /><span>REFERENCE IMAGE</span></div><button className="image-generate-button" onClick={generate} disabled={status === 'connecting'}>{status === 'connecting' ? <><LoaderCircle className="spin" size={16} /> Rendering...</> : <><Sparkles size={16} /> Generate video <ArrowUpRight size={16} /></>}</button></div>}
+            <section className="center-preview"><div className="preview-head"><span>PREVIEW</span><span className="render-status"><i /> {generatedMedia ? 'Complete' : status === 'connecting' ? 'Rendering' : 'Ready'}</span></div><div className="standard-preview"><div className={`preview-frame ${aspect === '9:16' ? 'portrait-preview' : ''}`} style={{ aspectRatio: aspect.replace(':', ' / ') }}>{generatedMedia ? generatedMediaIsVideo ? <video className="generated-video" src={generatedMedia} controls playsInline preload="metadata" /> : <img className="generated-video" src={generatedMedia} alt="Generated video preview" /> : <><div className="preview-placeholder"><div className="play-ring"><Play size={17} fill="currentColor" /></div><span>Your next shot<br /><b>will live here</b></span></div></>}</div></div>{generatedMedia && <div className="preview-actions"><a className="download-button" href={generatedMedia} download={`${exportPreset}-${exportPresets[exportPreset].width}x${exportPresets[exportPreset].height}.mp4`} title="Download video"><Download size={16} /> Download video</a><div className="extend-control"><select value={extensionDuration} onChange={(event) => setExtensionDuration(event.target.value)} aria-label="Additional video duration"><option value="5">+5 sec</option><option value="10">+10 sec</option><option value="20">+20 sec</option></select><button className="extend-button" onClick={extendGeneratedVideo} disabled={status === 'connecting'}>Extend</button></div><button className="delete-button" onClick={removeVideo} title="Delete video"><Trash2 size={16} /> Delete</button></div>}<div className="preview-note"><Gauge size={15} /><span>{exportPreset.startsWith('facebook-') ? `${exportPresets[exportPreset].label} · MP4` : 'Rendered locally on your GPU'}</span></div></section>
           </div>
         </div>
 

@@ -1,7 +1,6 @@
 # Motion Studio
 
-<img width="1912" height="1027" alt="image" src="https://github.com/user-attachments/assets/b6e9e8c2-eb88-472f-bbbf-865ffd92c674" />
-
+![Motion Studio](https://github.com/user-attachments/assets/b6e9e8c2-eb88-472f-bbbf-865ffd92c674)
 
 Motion Studio is a local video studio for creating short animations from text prompts and reference images. The React/Vite interface uses two local generation engines:
 
@@ -14,14 +13,9 @@ Generation requests, imported images, audio, and rendered videos stay on the com
 
 ### Prompt and input
 
-- Write a natural-language request in Italian or English in **Your request**.
-- Use **Create prompt** to generate an editable English animation prompt locally, without VS Code, an account, or a cloud AI service.
-- The prompt helper recognizes common requests such as kisses, waves, smiles, embraces, eye contact, stairs, dogs, and memorial memories.
-- Memorial prompts automatically request a respectful animation with no ghost, supernatural, or identity-changing effects.
-- Edit prompts up to 1,000 characters.
-- Use **Inspire me** to load a random example prompt.
+- Edit the single video prompt directly, up to 1,000 characters.
 - Import, replace, and remove PNG, JPEG, and WebP reference images.
-- Import an audio track, preview it in the browser, replace it, or remove it.
+- Import an audio track, preview it, and choose its start point. The music is mixed from that position into the video.
 
 ### Generation
 
@@ -41,7 +35,7 @@ Generation requests, imported images, audio, and rendered videos stay on the com
 - Download the generated result as an MP4 or remove it from the preview.
 - Extend a generated video by 5, 10, or 20 seconds.
 - Use the native LTX extension endpoint when supported, or automatically fall back to last-frame continuation and FFmpeg concatenation when it is not.
-- Mix selected audio into the generated video through the local bridge and FFmpeg.
+- Start the selected music at the chosen point and mix it into the generated video through the local bridge and FFmpeg.
 - Restore the most recent local MP4 when the application starts.
 - Start a new video and clear the current image, audio, prompt, and generated result.
 
@@ -121,7 +115,7 @@ The desktop process creates the Electron window, starts the Motion bridge, start
 1. Open Motion Studio and confirm that **Local mode** and **GPU ready** are visible.
 2. Select **Settings** in the top bar if the output folder needs to be changed.
 3. For image animation, import a reference image and select **LTX Video**. For a Facebook Reel, choose **Facebook Reel · 1080 × 1920** and keep LTX selected. For generated scenes without a reference image, select **Wan 2.1 · 1.3B**.
-4. Optionally enter a natural-language request and choose **Create prompt**, then review or edit the generated prompt.
+4. Edit the video prompt directly to describe the desired motion.
 5. Choose duration and format, optionally insert audio, and select **Generate video**.
 6. Preview, download, delete, or extend the result. Audio is mixed locally after video generation.
 

@@ -14,6 +14,8 @@ const configFilePath = process.env.MOTION_CONFIG_FILE || path.join(process.cwd()
 const logFilePath = path.join(path.dirname(configFilePath), 'bridge.log')
 let outputDirectory = process.env.MOTION_OUTPUT_DIRECTORY || 'D:\\Videos\\videocreation\\outputs'
 const execFileAsync = promisify(execFile)
+let activeBackendRequest = null
+let activeGeneration = null
 
 const send = (response, status, body) => {
   response.writeHead(status, {
@@ -52,11 +54,12 @@ const postJson = async (url, headers, body) => {
         }, (response) => {
           const chunks = []
           response.on('data', (chunk) => chunks.push(chunk))
-          response.on('end', () => resolve({ status: response.statusCode || 500, body: Buffer.concat(chunks).toString('utf8') }))
+          response.on('end', () => { if (activeBackendRequest === request) activeBackendRequest = null; resolve({ status: response.statusCode || 500, body: Buffer.concat(chunks).toString('utf8') }) })
           response.on('error', reject)
         })
+        activeBackendRequest = request
         request.on('timeout', () => request.destroy(new Error('LTX request timed out.')))
-        request.on('error', reject)
+        request.on('error', (error) => { if (activeBackendRequest === request) activeBackendRequest = null; reject(error) })
         request.end(body)
       })
     } catch (error) {
@@ -66,6 +69,24 @@ const postJson = async (url, headers, body) => {
   }
   throw new Error('LTX request failed.')
 }
+
+const cancelLtxGeneration = () => new Promise((resolve) => {
+  const target = new URL(`${backendUrl}/api/generate/cancel`)
+  const request = httpRequest({
+    hostname: target.hostname,
+    port: target.port,
+    path: target.pathname,
+    method: 'POST',
+    headers: { Authorization: `Bearer ${authToken}`, 'Content-Length': 0, Connection: 'close' },
+    timeout: 10000,
+  }, (response) => {
+    response.resume()
+    response.on('end', () => resolve(response.statusCode >= 200 && response.statusCode < 300))
+  })
+  request.on('timeout', () => request.destroy(new Error('LTX cancellation timed out.')))
+  request.on('error', () => resolve(false))
+  request.end()
+})
 
 const loadConfig = async () => {
   try {
@@ -87,8 +108,23 @@ const writeDataUrl = async (dataUrl, filePath) => {
   await writeFile(filePath, Buffer.from(match[1], 'base64'))
 }
 
-const normalizeFacebookVideo = async (sourcePath, outputPath) => {
-  await execFileAsync('ffmpeg', ['-y', '-i', sourcePath, '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black', '-r', '30', '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', outputPath])
+const facebookDimensions = {
+  'facebook-feed': [1080, 1350],
+  'facebook-reel': [1080, 1920],
+  'facebook-landscape': [1920, 1080],
+}
+
+const normalizeFacebookVideo = async (sourcePath, outputPath, preset) => {
+  const [width, height] = facebookDimensions[preset] || facebookDimensions['facebook-reel']
+  await execFileAsync('ffmpeg', ['-y', '-i', sourcePath, '-vf', `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`, '-r', '30', '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', outputPath])
+}
+
+const familyAffectionNegativePrompt = 'sisters kissing on the lips, sisters lip-to-lip kiss, sibling mouth kiss, family members kissing on the lips, father kissing bride on the lips, father kissing daughter on the lips, father-daughter mouth kiss, lip contact between family members, lip-to-lip kiss, mouth kiss, kissing on the mouth, open-mouth kiss, romantic behavior, incest, inappropriate intimacy'
+
+const explicitlyRequestsLipKissing = (prompt = '') => {
+  const requestsLipKiss = /\b(?:kiss(?:es|ing)?|baci(?:arsi|ano|a|are)?|bacio)\b.{0,50}\b(?:lips?|mouth|labbra|bocca)\b|\b(?:lips?|mouth|labbra|bocca)\b.{0,50}\b(?:kiss(?:es|ing)?|baci(?:arsi|ano|a|are)?|bacio)\b/i.test(prompt)
+  const forbidsLipKiss = /\b(?:no|not|never|without|avoid|don't|do not|must not|must never|non|mai|nessun[oa]?|evita)\b.{0,35}\b(?:lip-to-lip|kiss(?:es|ing)?|baci(?:arsi|ano|a|are)?|bacio|lips?|mouth|labbra|bocca)\b/i.test(prompt)
+  return requestsLipKiss && !forbidsLipKiss
 }
 
 const mixVideoWithMusic = async (body) => {
@@ -106,7 +142,8 @@ const mixVideoWithMusic = async (body) => {
       await writeFile(videoPath, Buffer.from(await videoResponse.arrayBuffer()))
     } else throw new Error('The generated video is missing.')
     await writeDataUrl(body.audioData, audioPath)
-    await execFileAsync('ffmpeg', ['-y', '-i', videoPath, '-stream_loop', '-1', '-i', audioPath, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', mixedPath])
+    const trimStart = Math.max(0, Number(body.trimStart) || 0)
+    await execFileAsync('ffmpeg', ['-y', '-i', videoPath, '-ss', String(trimStart), '-i', audioPath, '-filter_complex', '[1:a:0]apad[aout]', '-map', '0:v:0', '-map', '[aout]', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', mixedPath])
     const video = await readFile(mixedPath)
     return { mimeType: 'video/mp4', data: video.toString('base64') }
   } finally {
@@ -122,15 +159,16 @@ const generateContinuation = async (videoPath, duration, prompt, aspectRatio, id
   const [sourceWidth, sourceHeight] = dimensionsOutput.trim().split('x').map(Number)
   await execFileAsync('ffmpeg', ['-y', '-sseof', '-0.1', '-i', videoPath, '-frames:v', '1', framePath])
   const imageData = `data:image/png;base64,${(await readFile(framePath)).toString('base64')}`
+  const generationAspect = aspectRatio === '4:5' ? '9:16' : aspectRatio
   const ltxResponse = await postJson(`${backendUrl}/api/generate`, { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, JSON.stringify({
     prompt: `${prompt || 'Continue the natural movement smoothly from the final frame.'} Continue seamlessly from the starting image. Preserve the people, faces, clothes, setting, and camera framing.`,
-    negativePrompt: 'scene change, camera movement, zoom, dolly, pan, crop, identity change, distorted faces, distorted hands',
+    negativePrompt: `${explicitlyRequestsLipKissing(prompt) ? '' : `${familyAffectionNegativePrompt}, `}scene change, camera movement, zoom, dolly, pan, crop, identity change, distorted faces, distorted hands`,
     cameraMotion: 'none',
     duration,
     resolution: '720p',
     model: 'fast',
     fps: 24,
-    aspectRatio,
+    aspectRatio: generationAspect,
     imageData,
     imagePath: framePath,
   }))
@@ -169,8 +207,8 @@ const extendVideo = async (body) => {
       }
     }
     if (!resultPath || (extendResponse.status !== 200 && !resultPath)) throw new Error(result.message || result.detail || 'LTX rejected the video extension.')
-    const outputPath = body.exportPreset === 'facebook-reel' ? path.join(uploadDirectory, `${randomUUID()}-facebook-extended.mp4`) : resultPath
-    if (body.exportPreset === 'facebook-reel') await normalizeFacebookVideo(resultPath, outputPath)
+    const outputPath = body.exportPreset?.startsWith('facebook-') ? path.join(uploadDirectory, `${randomUUID()}-facebook-extended.mp4`) : resultPath
+    if (body.exportPreset?.startsWith('facebook-')) await normalizeFacebookVideo(resultPath, outputPath, body.exportPreset)
     const video = await readFile(outputPath)
     await rm(resultPath, { force: true })
     if (outputPath !== resultPath) await rm(outputPath, { force: true })
@@ -193,15 +231,15 @@ const projectSummary = async () => ({ outputDirectory, count: (await listVideos(
 
 const systemSummary = async () => {
   try {
-    const { stdout } = await execFileAsync('nvidia-smi.exe', ['--query-gpu=name,memory.total,memory.used', '--format=csv,noheader,nounits'], { windowsHide: true, timeout: 5000 })
-    const [name, total, used] = stdout.trim().split(',').map((value) => value.trim())
-    if (name && total) return { gpuName: name, vramTotalMb: Number(total), vramUsedMb: Number(used) || 0 }
+    const { stdout } = await execFileAsync('nvidia-smi.exe', ['--query-gpu=name,memory.total,memory.used,fan.speed,temperature.gpu', '--format=csv,noheader,nounits'], { windowsHide: true, timeout: 5000 })
+    const [name, total, used, fanSpeed, temperature] = stdout.trim().split(',').map((value) => value.trim())
+    if (name && total) return { gpuName: name, vramTotalMb: Number(total), vramUsedMb: Number(used) || 0, fanSpeedPercent: Number(fanSpeed), gpuTemperatureC: Number(temperature) }
   } catch {
     // nvidia-smi is not always on PATH, so use the Windows GPU provider below.
   }
   const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_VideoController | Where-Object { $_.AdapterRAM -gt 0 } | Select-Object -First 1 Name,AdapterRAM | ConvertTo-Json -Compress"], { windowsHide: true, timeout: 5000 })
   const fallback = JSON.parse(stdout.trim())
-  return { gpuName: fallback.Name || 'GPU detected locally', vramTotalMb: Math.round(Number(fallback.AdapterRAM || 0) / 1024 / 1024), vramUsedMb: null }
+  return { gpuName: fallback.Name || 'GPU detected locally', vramTotalMb: Math.round(Number(fallback.AdapterRAM || 0) / 1024 / 1024), vramUsedMb: null, fanSpeedPercent: null, gpuTemperatureC: null }
 }
 
 const server = createServer(async (request, response) => {
@@ -281,6 +319,19 @@ const server = createServer(async (request, response) => {
     }
     return
   }
+  if (request.method === 'POST' && request.url === '/cancel') {
+    const backendCancelled = await cancelLtxGeneration()
+    const generation = activeGeneration
+    if (generation) generation.cancelled = true
+    if (activeBackendRequest) {
+      activeBackendRequest.destroy(new Error('Generation cancelled by user.'))
+      activeBackendRequest = null
+    }
+    if (generation?.response && !generation.response.writableEnded) send(generation.response, 409, { message: 'Generation cancelled by user.' })
+    if (activeGeneration === generation) activeGeneration = null
+    send(response, 200, { cancelled: true, backendCancelled })
+    return
+  }
   if (request.method === 'POST' && request.url === '/extend') {
     try {
       const result = await extendVideo(await readJson(request))
@@ -297,35 +348,55 @@ const server = createServer(async (request, response) => {
   }
 
   let filePath
+  if (activeGeneration && !activeGeneration.response.writableEnded) {
+    send(response, 409, { message: 'Generation already in progress.' })
+    return
+  }
+  const generation = { response, cancelled: false }
+  activeGeneration = generation
+  response.on('close', () => {
+    if (response.writableEnded || generation.cancelled) return
+    generation.cancelled = true
+    if (activeGeneration === generation) activeGeneration = null
+    if (activeBackendRequest) {
+      activeBackendRequest.destroy(new Error('Generation client disconnected.'))
+      activeBackendRequest = null
+    }
+  })
   try {
     const body = await readJson(request)
     const match = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(body.imageData || '')
     if (!match) throw new Error('The reference image must be PNG, JPEG, or WebP.')
-    if (!['16:9', '9:16'].includes(body.aspectRatio)) throw new Error('LTX local I2V supports 16:9 and 9:16 only.')
+    const generationAspect = body.aspectRatio === '4:5' ? '9:16' : body.aspectRatio
+    if (!['16:9', '9:16'].includes(generationAspect)) throw new Error('LTX local I2V supports 16:9 and 9:16 only.')
     await mkdir(uploadDirectory, { recursive: true })
     const extension = match[1].split('/')[1].replace('jpeg', 'jpg')
     filePath = path.join(uploadDirectory, `${randomUUID()}.${extension}`)
     await writeFile(filePath, Buffer.from(match[2], 'base64'))
     const duration = Number(body.duration)
-    const resolution = duration > 5 ? '720p' : '1080p'
-    const ltxResponse = await postJson(`${backendUrl}/api/generate`, { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, JSON.stringify({ prompt: body.prompt, negativePrompt: body.wantsHandMotion ? 'camera movement, zoom, dolly, pan, crop, reframing, scene change' : '', cameraMotion: body.wantsHandMotion ? 'none' : undefined, duration, resolution, model: 'fast', fps: 24, aspectRatio: body.aspectRatio, imagePath: filePath }))
+    const resolution = '720p'
+    const relationshipNegativePrompt = explicitlyRequestsLipKissing(body.prompt) ? '' : `${familyAffectionNegativePrompt}, `
+    const ltxResponse = await postJson(`${backendUrl}/api/generate`, { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, JSON.stringify({ prompt: body.prompt, negativePrompt: `${relationshipNegativePrompt}${body.wantsHandMotion ? 'camera movement, zoom, dolly, pan, crop, reframing, scene change' : 'scene change, distorted faces, distorted hands'}`, cameraMotion: body.wantsHandMotion ? 'none' : undefined, duration, resolution, model: 'fast', fps: 24, aspectRatio: generationAspect, imagePath: filePath }))
+    if (generation.cancelled) return
     const result = JSON.parse(ltxResponse.body)
     if (ltxResponse.status < 200 || ltxResponse.status >= 300 || result.status !== 'complete' || !result.video_path) throw new Error(result.message || 'LTX rejected the generation request.')
-    const outputPath = body.exportPreset === 'facebook-reel' ? path.join(uploadDirectory, `${randomUUID()}-facebook.mp4`) : result.video_path
-    if (body.exportPreset === 'facebook-reel') await normalizeFacebookVideo(result.video_path, outputPath)
+    const outputPath = body.exportPreset?.startsWith('facebook-') ? path.join(uploadDirectory, `${randomUUID()}-facebook.mp4`) : result.video_path
+    if (body.exportPreset?.startsWith('facebook-')) await normalizeFacebookVideo(result.video_path, outputPath, body.exportPreset)
     const video = await readFile(outputPath)
     if (!body.hasMusic) {
       await mkdir(outputDirectory, { recursive: true })
-      await copyFile(outputPath, path.join(outputDirectory, body.exportPreset === 'facebook-reel' ? `facebook-reel-${Date.now()}.mp4` : path.basename(result.video_path)))
+      await copyFile(outputPath, path.join(outputDirectory, body.exportPreset?.startsWith('facebook-') ? `${body.exportPreset}-${Date.now()}.mp4` : path.basename(result.video_path)))
     }
     await rm(result.video_path, { force: true })
     if (outputPath !== result.video_path) await rm(outputPath, { force: true })
     send(response, 200, { mimeType: 'video/mp4', data: video.toString('base64') })
   } catch (error) {
+    if (generation.cancelled || response.writableEnded) return
     await logError('generate', error)
-    send(response, 502, { message: error instanceof Error ? error.message : 'LTX bridge failed.' })
+    if (!response.writableEnded) send(response, 502, { message: error instanceof Error ? error.message : 'LTX bridge failed.' })
   } finally {
     if (filePath) await rm(filePath, { force: true })
+    if (activeGeneration === generation) activeGeneration = null
   }
 })
 
