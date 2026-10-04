@@ -39,9 +39,9 @@ const logError = async (scope, error) => {
   await appendFile(logFilePath, `[${new Date().toISOString()}] ${scope}: ${message}\n`)
 }
 
-const postJson = async (url, headers, body) => {
+const postJson = async (url, headers, body, maxConnectionAttempts = 90) => {
   const target = new URL(url)
-  for (let attempt = 0; attempt < 90; attempt += 1) {
+  for (let attempt = 0; attempt < maxConnectionAttempts; attempt += 1) {
     try {
       return await new Promise((resolve, reject) => {
         const request = httpRequest({
@@ -63,11 +63,33 @@ const postJson = async (url, headers, body) => {
         request.end(body)
       })
     } catch (error) {
-      if (error?.code !== 'ECONNREFUSED' || attempt === 89) throw error
+      if (error?.code !== 'ECONNREFUSED' || attempt === maxConnectionAttempts - 1) throw error
       await new Promise((resolve) => setTimeout(resolve, 1000))
     }
   }
   throw new Error('LTX request failed.')
+}
+
+const translatePromptLocally = async (prompt) => {
+  const translationRequest = [
+    'Translate the following video-generation prompt from Italian into natural, concise English.',
+    'Preserve the user’s requested actions, subjects, timing, and constraints exactly.',
+    'Do not add new actions, subjects, setting details, or camera movements.',
+    'Return only the English translation as one paragraph.',
+    '',
+    'Italian prompt:',
+    prompt,
+  ].join('\n')
+  const response = await postJson(
+    `${backendUrl}/api/enhance-prompt`,
+    { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+    JSON.stringify({ prompt: translationRequest, provider: 'local', mediaType: 'video' }),
+  )
+  const result = JSON.parse(response.body)
+  if (response.status < 200 || response.status >= 300 || typeof result.enhancedPrompt !== 'string' || !result.enhancedPrompt.trim()) {
+    throw new Error(result.detail || result.message || 'Local prompt translation failed.')
+  }
+  return result.enhancedPrompt.trim()
 }
 
 const cancelLtxGeneration = () => new Promise((resolve) => {
@@ -116,65 +138,134 @@ const facebookDimensions = {
 
 const normalizeFacebookVideo = async (sourcePath, outputPath, preset, duration = undefined) => {
   const [width, height] = facebookDimensions[preset] || facebookDimensions['facebook-reel']
-  const args = ['-y', '-i', sourcePath, '-vf', `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`, '-r', '30', '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart']
+  const args = ['-y', '-i', sourcePath, '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black`, '-r', '30', '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart']
   if (duration) args.push('-t', String(duration))
   args.push(outputPath)
   await execFileAsync('ffmpeg', args)
 }
 
-const generateImageSequence = async (body, generation) => {
-  const images = Array.isArray(body.images) ? body.images : []
-  if (images.length < 2) throw new Error('Select at least two images to create a sequence.')
-  if (images.length > 20) throw new Error('A sequence can contain up to 20 images.')
-  const duration = Number(body.duration)
-  if (!Number.isFinite(duration) || duration < 1 || duration > 30) throw new Error('Each sequence image must be between 1 and 30 seconds.')
+const explicitlyForbidsKissing = (prompt = '') => /\b(?:no|never|without|avoid|don't|do not|must not|must never)\b.{0,45}\b(?:kiss(?:es|ing)?|lip-to-lip|lips? touching|mouths? touching)\b|\b(?:non|mai|senza|evita|non devono|non deve)\b.{0,45}\b(?:baci(?:arsi|ano|a|are)?|bacio|labbra a contatto|bocche a contatto)\b/i.test(prompt)
+
+const cleanPositiveMotionPrompt = (requestedAction = '') => {
+  const requestedKissBan = explicitlyForbidsKissing(requestedAction)
+  const sentences = requestedAction.trim().split(/(?<=[.!?])\s+/)
+  const cleaned = requestedKissBan
+    ? sentences.filter((sentence) => !explicitlyForbidsKissing(sentence)).join(' ')
+    : requestedAction.trim()
+  return cleaned
+    .replace(/\b(?:no|never|without|avoid|don't|do not|must not|must never)\s+(?:any\s+)?(?:zoom(?:ing)?|camera movement|camera motion)\b/gi, ' ')
+    .replace(/\b(?:niente|nessun[oa]?|senza|non|evita)\s+(?:fare\s+)?(?:lo\s+)?(?:zoom|movimento della camera|movimento di camera)\b/gi, ' ')
+    .replace(/\b(?:and|e)?\s*(?:no|never|without|avoid|don't|do not|must not|must never)\s+(?:any\s+)?(?:change|changes|changing)\s+(?:to\s+)?(?:the\s+)?(?:face|faces|identity|identities)\b/gi, ' ')
+    .replace(/\b(?:e|and)?\s*(?:cambiamento|cambiamenti|modifica|modifiche)\s+(?:(?:del|dei|delle|di)\s+)?(?:volto|volti|faccia|facce|identità)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.!?;])/g, '$1')
+    .trim()
+}
+
+const buildImageMotionPrompt = (requestedAction = '') => {
+  const action = cleanPositiveMotionPrompt(requestedAction) || 'Animate the existing subjects with clearly visible, natural movement throughout the clip.'
+  const noFaceApproachConstraint = explicitlyForbidsKissing(requestedAction)
+    ? 'Keep both heads and faces fixed in their original positions and orientations; animate only arms and shoulders, maintaining the existing space between faces.'
+    : ''
+  return `${action} Make the requested subject movements clearly visible and continuous from the first frame to the last; show purposeful body movement, not only blinking or breathing. ${noFaceApproachConstraint} Preserve the original people, identities, ages, clothing, positions, and background. The camera is locked off on a tripod; framing and subject scale remain constant for the entire clip. The people are the source of motion, not the camera.`.replace(/\s+/g, ' ').trim()
+}
+
+const buildImageNegativePrompt = (requestedAction = '') => {
+  const requestedNoKiss = explicitlyForbidsKissing(requestedAction) && !explicitlyRequestsLipKissing(requestedAction)
+  const relationshipPrompt = explicitlyRequestsLipKissing(requestedAction) ? '' : `${familyAffectionNegativePrompt}, `
+  const noKissPrompt = requestedNoKiss ? 'kissing, kiss on the lips, mouth-to-mouth kiss, lips touching, mouth contact, face-to-face kiss, romantic kissing, ' : ''
+  return `${relationshipPrompt}${noKissPrompt}frozen subjects, still image, slideshow, new people, extra people, duplicated people, extra faces, duplicate face, changed identity, face morphing, age change, different people, missing people, added props, collage, split screen, scene change, camera movement, zoom, crop, reframing, distorted faces, distorted hands, text, watermark`
+}
+
+const generateMediaSequence = async (body, generation) => {
+  const items = Array.isArray(body.items)
+    ? body.items
+    : (Array.isArray(body.images) ? body.images.map((data) => ({ kind: 'image', data })) : [])
+  if (items.length < 1) throw new Error('Add at least one image or video to the sequence.')
+  if (items.length > 20) throw new Error('A sequence can contain up to 20 media items.')
+  const imageDuration = Number(body.duration)
+  if (!Number.isFinite(imageDuration) || imageDuration < 1 || imageDuration > 30) throw new Error('Each image must be between 1 and 30 seconds.')
   const id = randomUUID()
   const temporaryFiles = []
   const segmentFiles = []
+  const segmentDurations = []
   const sequencePath = path.join(uploadDirectory, `${id}-sequence.mp4`)
   temporaryFiles.push(sequencePath)
   await mkdir(uploadDirectory, { recursive: true })
+  const aspectDimensions = { '9:16': [720, 1280], '4:5': [720, 900], '3:4': [720, 960], '1:1': [900, 900], '16:9': [1280, 720] }
   const [frameWidth, frameHeight] = body.exportPreset?.startsWith('facebook-')
     ? facebookDimensions[body.exportPreset] || facebookDimensions['facebook-reel']
-    : body.aspectRatio === '9:16' ? [720, 1280] : [1280, 720]
-  const transitionDuration = 0.4
+    : aspectDimensions[body.aspectRatio] || aspectDimensions['9:16']
+  const normalizeSegment = async (sourcePath, outputPath, duration) => {
+    const { stdout } = await execFileAsync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'json', sourcePath])
+    const hasAudio = !body.muteOriginalAudio && (JSON.parse(stdout).streams || []).some((stream) => stream.codec_type === 'audio')
+    const args = ['-y', '-i', sourcePath]
+    if (!hasAudio) args.push('-f', 'lavfi', '-t', String(duration), '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100')
+    args.push('-vf', `scale=${frameWidth}:${frameHeight}:force_original_aspect_ratio=decrease,pad=${frameWidth}:${frameHeight}:(ow-iw)/2:(oh-ih)/2:black,fps=30,setsar=1`, '-map', '0:v:0', '-map', hasAudio ? '0:a:0' : '1:a:0', '-af', 'apad', '-t', String(duration), '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2', '-movflags', '+faststart', outputPath)
+    await execFileAsync('ffmpeg', args)
+  }
   try {
-    for (let index = 0; index < images.length; index += 1) {
+    for (let index = 0; index < items.length; index += 1) {
       if (generation.cancelled) return null
-      const match = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(images[index] || '')
-      if (!match) throw new Error(`Sequence image ${index + 1} is not a valid image.`)
-      const extension = match[1].split('/')[1].replace('jpeg', 'jpg')
-      const imagePath = path.join(uploadDirectory, `${id}-${index + 1}.${extension}`)
-      const rawVideoPath = path.join(uploadDirectory, `${id}-${index + 1}-raw.mp4`)
+      const item = items[index]
       const segmentPath = path.join(uploadDirectory, `${id}-${index + 1}-segment.mp4`)
-      temporaryFiles.push(imagePath, rawVideoPath, segmentPath)
+      temporaryFiles.push(segmentPath)
       segmentFiles.push(segmentPath)
-      await writeFile(imagePath, Buffer.from(match[2], 'base64'))
-      const requestedMotion = typeof body.prompt === 'string' ? body.prompt.trim() : ''
-      const motionPrompt = `${requestedMotion ? `${requestedMotion}. ` : ''}Animate only the people in this single reference photo with gentle, natural movement: a soft blink, subtle breathing, and a small warm smile. Preserve each person's identity, facial features, and exact age as shown in this specific photo. Keep the original clothing, number of people, composition, and background. No new people, no missing people, no face blending, no collage, no split screen, no scene change. Keep the camera fixed with no zoom or reframing.`
-      const ltxResponse = await postJson(`${backendUrl}/api/generate`, { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, JSON.stringify({ prompt: motionPrompt, negativePrompt: 'identity change, face morphing, age change, different people, extra people, missing people, collage, split screen, scene change, camera movement, zoom, crop, reframing, distorted faces, distorted hands, text, watermark', cameraMotion: 'none', duration, resolution: '720p', model: 'fast', fps: 24, aspectRatio: body.aspectRatio === '4:5' ? '9:16' : body.aspectRatio, imagePath }))
-      if (generation.cancelled) return null
-      const result = JSON.parse(ltxResponse.body)
-      if (ltxResponse.status < 200 || ltxResponse.status >= 300 || result.status !== 'complete' || !result.video_path) throw new Error(result.message || `LTX could not animate image ${index + 1}.`)
-      if (body.exportPreset?.startsWith('facebook-')) {
-        await normalizeFacebookVideo(result.video_path, segmentPath, body.exportPreset, duration)
+      if (item.kind === 'video') {
+        const match = /^data:(video\/(?:mp4|webm|quicktime|x-matroska));base64,(.+)$/.exec(item.data || '')
+        if (!match) throw new Error(`Sequence video ${index + 1} is not a supported MP4, WebM, MOV, or MKV file.`)
+        const extension = { mp4: 'mp4', webm: 'webm', quicktime: 'mov', 'x-matroska': 'mkv' }[match[1].slice('video/'.length)]
+        const sourcePath = path.join(uploadDirectory, `${id}-${index + 1}-source.${extension}`)
+        temporaryFiles.push(sourcePath)
+        await writeFile(sourcePath, Buffer.from(match[2], 'base64'))
+        const { stdout } = await execFileAsync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', sourcePath])
+        const duration = Number(stdout.trim())
+        if (!Number.isFinite(duration) || duration <= 0) throw new Error(`Unable to read the duration of video ${index + 1}.`)
+        if (duration > 1200) throw new Error('Each imported video must be 20 minutes or shorter.')
+        segmentDurations.push(duration)
+        await normalizeSegment(sourcePath, segmentPath, duration)
       } else {
-        await execFileAsync('ffmpeg', ['-y', '-i', result.video_path, '-vf', `scale=${frameWidth}:${frameHeight}:force_original_aspect_ratio=decrease,pad=${frameWidth}:${frameHeight}:(ow-iw)/2:(oh-ih)/2`, '-t', String(duration), '-r', '30', '-map', '0:v:0', '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', segmentPath])
+        const match = /^data:image\/(?:png|jpeg|webp);base64,(.+)$/.exec(item.data || '')
+        if (!match) throw new Error(`Sequence image ${index + 1} is not a valid PNG, JPEG, or WebP image.`)
+        const imagePath = path.join(uploadDirectory, `${id}-${index + 1}.png`)
+        const generatedPath = path.join(uploadDirectory, `${id}-${index + 1}-animated.mp4`)
+        temporaryFiles.push(imagePath, generatedPath)
+        await writeFile(imagePath, Buffer.from(match[1], 'base64'))
+        segmentDurations.push(imageDuration)
+        if (item.animate === false) {
+          await execFileAsync('ffmpeg', ['-y', '-loop', '1', '-framerate', '30', '-i', imagePath, '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-vf', `scale=${frameWidth}:${frameHeight}:force_original_aspect_ratio=decrease,pad=${frameWidth}:${frameHeight}:(ow-iw)/2:(oh-ih)/2:black,setsar=1`, '-map', '0:v:0', '-map', '1:a:0', '-t', String(imageDuration), '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-shortest', '-movflags', '+faststart', segmentPath])
+        } else {
+          const motionPrompt = buildImageMotionPrompt(typeof body.prompt === 'string' ? body.prompt : '')
+          const ltxResponse = await postJson(`${backendUrl}/api/generate`, { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, JSON.stringify({ prompt: motionPrompt, negativePrompt: buildImageNegativePrompt(typeof body.prompt === 'string' ? body.prompt : ''), cameraMotion: 'static', duration: imageDuration, resolution: '720p', model: 'fast', fps: 24, aspectRatio: body.aspectRatio === '4:5' ? '9:16' : body.aspectRatio, imagePath }))
+          if (generation.cancelled) return null
+          const result = JSON.parse(ltxResponse.body)
+          if (ltxResponse.status < 200 || ltxResponse.status >= 300 || result.status !== 'complete' || !result.video_path) throw new Error(result.message || `LTX could not animate image ${index + 1}.`)
+          await normalizeSegment(result.video_path, segmentPath, imageDuration)
+          await rm(result.video_path, { force: true })
+          if (result.video_path !== generatedPath) temporaryFiles.push(result.video_path)
+        }
       }
-      await rm(result.video_path, { force: true })
     }
     if (generation.cancelled) return null
+    const transitionDuration = Math.min(0.4, ...segmentDurations.map((duration) => duration / 2))
     const ffmpegArgs = ['-y']
     for (const segmentPath of segmentFiles) ffmpegArgs.push('-i', segmentPath)
-    const filters = segmentFiles.map((_, index) => `[${index}:v]fps=30,setsar=1,format=yuv420p,settb=AVTB,setpts=PTS-STARTPTS[v${index}]`)
-    let previous = 'v0'
-    for (let index = 1; index < images.length; index += 1) {
-      const output = `xf${index}`
-      const offset = (duration - transitionDuration) * index
-      filters.push(`[${previous}][v${index}]xfade=transition=fadeblack:duration=${transitionDuration}:offset=${offset}[${output}]`)
-      previous = output
+    const filters = segmentFiles.map((_, index) => `[${index}:v]fps=30,setsar=1,format=yuv420p,settb=AVTB,setpts=PTS-STARTPTS[v${index}];[${index}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS[a${index}]`)
+    let previousVideo = 'v0'
+    let previousAudio = 'a0'
+    let elapsedDuration = segmentDurations[0]
+    for (let index = 1; index < items.length; index += 1) {
+      const videoOutput = `xf${index}`
+      const audioOutput = `af${index}`
+      const offset = elapsedDuration - transitionDuration
+      filters.push(`[${previousVideo}][v${index}]xfade=transition=fade:duration=${transitionDuration}:offset=${offset}[${videoOutput}]`)
+      filters.push(`[${previousAudio}][a${index}]acrossfade=d=${transitionDuration}:c1=tri:c2=tri[${audioOutput}]`)
+      previousVideo = videoOutput
+      previousAudio = audioOutput
+      elapsedDuration += segmentDurations[index] - transitionDuration
     }
-    ffmpegArgs.push('-filter_complex', filters.join(';'), '-map', `[${previous}]`, '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', '30', '-movflags', '+faststart', sequencePath)
+    const totalDuration = segmentDurations.reduce((total, duration) => total + duration, 0) - transitionDuration * Math.max(0, segmentDurations.length - 1)
+    ffmpegArgs.push('-filter_complex', filters.join(';'), '-map', `[${previousVideo}]`, '-map', `[${previousAudio}]`, '-t', String(totalDuration), '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', '30', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', sequencePath)
     await execFileAsync('ffmpeg', ffmpegArgs)
     const video = await readFile(sequencePath)
     await mkdir(outputDirectory, { recursive: true })
@@ -210,7 +301,10 @@ const mixVideoWithMusic = async (body) => {
     } else throw new Error('The generated video is missing.')
     await writeDataUrl(body.audioData, audioPath)
     const trimStart = Math.max(0, Number(body.trimStart) || 0)
-    await execFileAsync('ffmpeg', ['-y', '-i', videoPath, '-ss', String(trimStart), '-i', audioPath, '-filter_complex', '[1:a:0]apad[aout]', '-map', '0:v:0', '-map', '[aout]', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', mixedPath])
+    const { stdout: streamInfo } = await execFileAsync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'json', videoPath])
+    const keepOriginalAudio = body.preserveOriginalAudio && (JSON.parse(streamInfo).streams || []).some((stream) => stream.codec_type === 'audio')
+    const audioFilter = keepOriginalAudio ? '[0:a:0]volume=0.25[original];[1:a:0]apad[music];[original][music]amix=inputs=2:duration=longest:dropout_transition=2[aout]' : '[1:a:0]apad[aout]'
+    await execFileAsync('ffmpeg', ['-y', '-i', videoPath, '-ss', String(trimStart), '-i', audioPath, '-filter_complex', audioFilter, '-map', '0:v:0', '-map', '[aout]', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', mixedPath])
     const video = await readFile(mixedPath)
     return { mimeType: 'video/mp4', data: video.toString('base64') }
   } finally {
@@ -234,7 +328,7 @@ const generateContinuation = async (videoPath, duration, prompt, aspectRatio, id
   const ltxResponse = await postJson(`${backendUrl}/api/generate`, { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, JSON.stringify({
     prompt: `${prompt || 'Continue the natural movement smoothly from the final frame.'} Continue seamlessly from the starting image. Preserve the people, faces, clothes, setting, camera framing, and exact size of every person in frame. Do not pull back or make the group smaller.`,
     negativePrompt: `${explicitlyRequestsLipKissing(prompt) ? '' : `${familyAffectionNegativePrompt}, `}scene change, camera movement, zoom, zoom out, dolly, pan, crop, reframing, pull back, shrinking subjects, smaller people, identity change, distorted faces, distorted hands`,
-    cameraMotion: 'none',
+    cameraMotion: 'static',
     duration,
     resolution: '720p',
     model: 'fast',
@@ -349,6 +443,18 @@ const server = createServer(async (request, response) => {
     }
     return
   }
+  if (request.method === 'POST' && request.url === '/translate-prompt') {
+    try {
+      const body = await readJson(request)
+      if (typeof body.prompt !== 'string' || !body.prompt.trim()) throw new Error('Enter an Italian prompt to translate.')
+      if (body.prompt.length > 1000) throw new Error('The prompt must be 1,000 characters or fewer.')
+      send(response, 200, { translatedPrompt: await translatePromptLocally(body.prompt.trim()) })
+    } catch (error) {
+      await logError('translate-prompt', error)
+      send(response, 502, { message: error instanceof Error ? error.message : 'Local prompt translation failed.' })
+    }
+    return
+  }
   if (request.method === 'GET' && request.url === '/system') {
     try {
       send(response, 200, await systemSummary())
@@ -435,7 +541,7 @@ const server = createServer(async (request, response) => {
       }
     })
     try {
-      const result = await generateImageSequence(await readJson(request), generation)
+      const result = await generateMediaSequence(await readJson(request), generation)
       if (!generation.cancelled && result) send(response, 200, result)
     } catch (error) {
       if (generation.cancelled || response.writableEnded) return
@@ -479,8 +585,9 @@ const server = createServer(async (request, response) => {
     await writeFile(filePath, Buffer.from(match[2], 'base64'))
     const duration = Number(body.duration)
     const resolution = '720p'
-    const relationshipNegativePrompt = explicitlyRequestsLipKissing(body.prompt) ? '' : `${familyAffectionNegativePrompt}, `
-    const ltxResponse = await postJson(`${backendUrl}/api/generate`, { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, JSON.stringify({ prompt: body.prompt, negativePrompt: `${relationshipNegativePrompt}${body.wantsHandMotion ? 'camera movement, zoom, dolly, pan, crop, reframing, scene change' : 'scene change, distorted faces, distorted hands'}`, cameraMotion: body.wantsHandMotion ? 'none' : undefined, duration, resolution, model: 'fast', fps: 24, aspectRatio: generationAspect, imagePath: filePath }))
+    const prompt = buildImageMotionPrompt(typeof body.prompt === 'string' ? body.prompt : '')
+    const negativePrompt = buildImageNegativePrompt(typeof body.prompt === 'string' ? body.prompt : '')
+    const ltxResponse = await postJson(`${backendUrl}/api/generate`, { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, JSON.stringify({ prompt, negativePrompt, cameraMotion: 'static', duration, resolution, model: 'fast', fps: 24, aspectRatio: generationAspect, imagePath: filePath }))
     if (generation.cancelled) return
     const result = JSON.parse(ltxResponse.body)
     if (ltxResponse.status < 200 || ltxResponse.status >= 300 || result.status !== 'complete' || !result.video_path) throw new Error(result.message || 'LTX rejected the generation request.')

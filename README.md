@@ -14,6 +14,7 @@ Generation requests, imported images, audio, and rendered videos stay on the com
 ### Prompt and input
 
 - Edit the single video prompt directly, up to 1,000 characters.
+- Write prompts in Italian and translate them locally to English with the installed LTX Gemma enhancer. The English result replaces the Italian text in the same prompt field; prompts entered directly in English remain unchanged. Translation stays on this computer and is not sent to an external service.
 - Import, replace, and remove PNG, JPEG, and WebP reference images.
 - Import an audio track, preview it, and choose its start point. The music is mixed from that position into the video.
 
@@ -21,7 +22,7 @@ Generation requests, imported images, audio, and rendered videos stay on the com
 
 - Choose between **LTX Video** and **Wan 2.1 · 1.3B** when the model is installed.
 - Choose a duration of 3, 5, 8, or 10 seconds.
-- Choose a 16:9, 9:16, 3:4, or 1:1 format.
+- Choose a 16:9 or 9:16 generation format supported by LTX.
 - Use the **Facebook Reel · 1080 × 1920** export preset for a portrait MP4 ready to upload as a Facebook Reel. The preset selects 9:16 and 5 seconds, and normalizes the LTX result to H.264, 30 fps, AAC, and fast-start MP4 metadata.
 - Generate image-to-video animations with LTX Desktop. LTX requires a reference image and supports 16:9 and 9:16 in this application.
 - Generate text-to-video animations with the local Wan workflow in ComfyUI.
@@ -119,7 +120,7 @@ The desktop process creates the Electron window, starts the Motion bridge, start
 5. Choose duration and format, optionally insert audio, and select **Generate video**.
 6. Preview, download, delete, or extend the result. Audio is mixed locally after video generation.
 
-For LTX, the reference image controls the visual identity and composition. The prompt should describe restrained movement and avoid asking for a new scene, camera move, or major change to the subject.
+For LTX, the reference image controls the visual identity and composition. Describe the requested subject action positively and specifically (for example, who waves, smiles, or turns their head). Motion Studio reinforces visible subject movement and a locked camera in the image-to-video prompt; negative camera instructions are removed from the positive prompt because the local Fast pipeline does not use its negative-prompt field.
 
 ## Local architecture
 
@@ -147,7 +148,7 @@ The Wan workflow is tuned for 512x288, 17 frames, and 12 steps on an RTX 5060 Ti
 
 Wan is text-to-video only in this application. Reference images are intentionally rejected for Wan; select LTX Video for image-to-video generation. Wan 2.2 and the full HunyuanVideo workflow are not included because of their higher memory requirements.
 
-LTX currently accepts only 16:9 and 9:16. Reference images are resized into the target canvas before they are sent to the local LTX bridge. This local I2V path supports clips up to 10 seconds: Motion Studio uses 1080p for clips up to 5 seconds and 720p for longer clips. Direct LTX extension may return an unsupported response on some local installations; the bridge then creates continuation clips from the last frame and concatenates them with FFmpeg. Audio mixing and fallback extension require a working `ffmpeg` executable.
+LTX currently accepts only 16:9 and 9:16 generation formats, which are the only formats exposed by the format selector. Facebook export presets may normalize the generated video to their preset dimensions after generation. Reference images are resized into the target canvas before they are sent to the local LTX bridge. This local I2V path supports clips up to 10 seconds: Motion Studio uses 1080p for clips up to 5 seconds and 720p for longer clips. Direct LTX extension may return an unsupported response on some local installations; the bridge then creates continuation clips from the last frame and concatenates them with FFmpeg. Audio mixing and fallback extension require a working `ffmpeg` executable.
 
 When a local service is unavailable or a render fails, Motion Studio displays the error in the generation area instead of presenting an invalid video as a successful result.
 

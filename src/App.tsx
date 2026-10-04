@@ -29,7 +29,7 @@ type Model = {
   installed: boolean
 }
 
-type SequenceImage = { id: string; file: File; url: string }
+type SequenceMedia = { id: string; file: File; url: string; kind: 'image' | 'video'; duration?: number; animate?: boolean }
 
 const models: Model[] = [
   { name: 'Wan 2.1 · 1.3B', maker: 'Alibaba · installed', tag: 'LOCAL READY', memory: '16 GB+', detail: 'Text-to-video, tuned for this GPU', color: 'amber', installed: true },
@@ -39,18 +39,29 @@ const models: Model[] = [
 
 
 const exportPresets: Record<string, { label: string; aspect: string; width: number; height: number }> = {
-  'facebook-feed': { label: 'Facebook Feed · 1080 × 1350', aspect: '4:5', width: 1080, height: 1350 },
+  'facebook-feed': { label: 'Facebook Feed · 1080 × 1350', aspect: '9:16', width: 1080, height: 1350 },
   'facebook-reel': { label: 'Facebook Reel / Story · 1080 × 1920', aspect: '9:16', width: 1080, height: 1920 },
   'facebook-landscape': { label: 'Facebook Landscape · 1920 × 1080', aspect: '16:9', width: 1920, height: 1080 },
   original: { label: 'Original format', aspect: '16:9', width: 0, height: 0 },
 }
 
+const readSavedChoice = <T extends string>(key: string, fallback: T, choices: readonly T[]): T => {
+  try {
+    const saved = window.localStorage.getItem(key)
+    return saved && choices.includes(saved as T) ? saved as T : fallback
+  } catch {
+    return fallback
+  }
+}
+
 function App() {
   const [selectedModel, setSelectedModel] = useState(models[1])
   const [prompt, setPrompt] = useState('')
+  const [translationStatus, setTranslationStatus] = useState<'idle' | 'translating' | 'ready' | 'error'>('idle')
+  const [translationError, setTranslationError] = useState('')
   const [duration, setDuration] = useState('5 sec')
-  const [aspect, setAspect] = useState('9:16')
-  const [exportPreset, setExportPreset] = useState('facebook-reel')
+  const [aspect, setAspect] = useState<string>(() => readSavedChoice('motion.aspect', '9:16', ['16:9', '9:16'] as const))
+  const [exportPreset, setExportPreset] = useState<string>(() => readSavedChoice('motion.exportPreset', 'facebook-reel', Object.keys(exportPresets)))
   const [status, setStatus] = useState<'idle' | 'connecting' | 'error'>('idle')
   const [generationMessage, setGenerationMessage] = useState('')
   const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null)
@@ -60,7 +71,8 @@ function App() {
   const [extensionDuration, setExtensionDuration] = useState('5')
   const [referenceImage, setReferenceImage] = useState<string | null>(null)
   const [referenceFile, setReferenceFile] = useState<File | null>(null)
-  const [sequenceImages, setSequenceImages] = useState<SequenceImage[]>([])
+  const [sequenceItems, setSequenceItems] = useState<SequenceMedia[]>([])
+  const [muteOriginalAudio, setMuteOriginalAudio] = useState(false)
   const [musicTrack, setMusicTrack] = useState<{ name: string; url: string; file: File } | null>(null)
   const [musicDurationSeconds, setMusicDurationSeconds] = useState(0)
   const [musicTrimStartSeconds, setMusicTrimStartSeconds] = useState(0)
@@ -78,6 +90,16 @@ function App() {
   const musicPreviewRef = useRef<HTMLAudioElement>(null)
   const cancelRequestedRef = useRef(false)
   const generationControllerRef = useRef<AbortController | null>(null)
+  const translationRequestRef = useRef<{ source: string; promise: Promise<string> } | null>(null)
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('motion.aspect', aspect)
+      window.localStorage.setItem('motion.exportPreset', exportPreset)
+    } catch {
+      // Keep the current selections for this session if storage is unavailable.
+    }
+  }, [aspect, exportPreset])
 
   useEffect(() => {
     if (status !== 'connecting' || generationStartedAt === null) return
@@ -160,7 +182,7 @@ function App() {
       image.onload = () => resolve()
       image.onerror = () => reject(new Error('Unable to read the reference image.'))
     })
-    const [targetWidth, targetHeight] = targetAspect === '9:16' ? [704, 1280] : [1280, 704]
+    const [targetWidth, targetHeight] = targetAspect === '9:16' ? [720, 1280] : [1280, 720]
     const scaleX = targetWidth / image.naturalWidth
     const scaleY = targetHeight / image.naturalHeight
     const scale = preserveComposition ? Math.min(scaleX, scaleY) : Math.max(scaleX, scaleY)
@@ -178,27 +200,60 @@ function App() {
     return canvas.toDataURL('image/png')
   }
 
+  const translatePromptLocally = async (sourcePrompt: string) => {
+    const source = sourcePrompt.trim()
+    if (!source) return ''
+    if (translationRequestRef.current?.source === source) return translationRequestRef.current.promise
+    setTranslationStatus('translating')
+    setTranslationError('')
+    const translation = (async () => {
+      try {
+        const response = await fetch('http://127.0.0.1:41955/translate-prompt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: source }),
+        })
+        const result = await response.json() as { translatedPrompt?: string; message?: string }
+        if (!response.ok || !result.translatedPrompt?.trim()) {
+          throw new Error(result.message ?? 'Unable to translate the prompt locally.')
+        }
+        const translated = result.translatedPrompt.trim()
+        setPrompt((currentPrompt) => currentPrompt.trim() === source ? translated : currentPrompt)
+        setTranslationStatus('ready')
+        return translated
+      } catch (error) {
+        setTranslationStatus('error')
+        setTranslationError(error instanceof Error ? error.message : 'Unable to translate the prompt locally.')
+        throw error
+      }
+    })()
+    translationRequestRef.current = { source, promise: translation }
+    try {
+      return await translation
+    } finally {
+      if (translationRequestRef.current?.promise === translation) translationRequestRef.current = null
+    }
+  }
+
   const generateWithLtx = async (hasMusic = false) => {
-    if (!referenceFile) throw new Error('Import an image before starting I2V.')
+    if (!referenceFile && sequenceItems.length === 0) throw new Error('Add at least one image or video before generating.')
     const generationAspect = exportPreset === 'facebook-feed' || aspect === '4:5' ? '9:16' : aspect
     if (!['16:9', '9:16'].includes(generationAspect)) throw new Error('LTX local I2V supports 16:9 and 9:16 only.')
-    const preserveComposition = sequenceImages.length > 1 || exportPreset === 'facebook-feed' || aspect === '4:5'
-    const imageFiles = sequenceImages.length > 0 ? sequenceImages : [{ id: 'reference', file: referenceFile, url: referenceImage ?? '' }]
-    const imageData = await Promise.all(imageFiles.map((image) => prepareReferenceImage(image.file, generationAspect, preserveComposition)))
-    const wantsHandMotion = /mano|hand|wave|waving|salut/i.test(prompt)
-    const motionPrompt = wantsHandMotion
-      ? `${prompt}. Animate the raised hand slowly waving from side to side. Keep the camera locked and static: no zoom, no dolly, no pan, no crop, and no reframing.`
-      : preserveComposition
-        ? `${prompt}. Preserve the full group composition and keep every person visible at both edges of the frame. Locked static camera, no zoom, crop, or reframing.`
-        : prompt
+    const preserveComposition = true
+    const mediaItems = sequenceItems.length > 0 ? sequenceItems : referenceFile ? [{ id: 'reference', file: referenceFile, url: referenceImage ?? '', kind: 'image' as const }] : []
+    const preparedItems = await Promise.all(mediaItems.map(async (item) => item.kind === 'video'
+      ? { kind: item.kind, data: await fileToDataUrl(item.file) }
+      : { kind: item.kind, animate: item.animate !== false, data: await prepareReferenceImage(item.file, generationAspect, preserveComposition) }))
+    const motionPrompt = prompt.trim()
+    const needsImageAnimation = preparedItems.some((item) => item.kind === 'image' && item.animate !== false)
     const controller = new AbortController()
     generationControllerRef.current = controller
-    const isSequence = imageData.length > 1
-    if (isSequence) setGenerationMessage(`Creating a sequence from ${imageData.length} images...`)
+    const isSequence = preparedItems.length > 1 || preparedItems.some((item) => item.kind === 'video' || (item.kind === 'image' && item.animate === false))
+    if (isSequence) setGenerationMessage(`Assembling ${preparedItems.length} media clips...`)
     const response = await fetch(isSequence ? 'http://127.0.0.1:41955/sequence' : 'http://127.0.0.1:41955/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...(isSequence ? { images: imageData } : { imageData: imageData[0] }), hasMusic, wantsHandMotion, exportPreset, prompt: motionPrompt, duration: Number.parseInt(duration, 10), aspectRatio: generationAspect }),
+      body: JSON.stringify({ ...(isSequence ? { items: preparedItems } : { imageData: preparedItems[0]?.data }), muteOriginalAudio, hasMusic, exportPreset, prompt: motionPrompt, duration: Number.parseInt(duration, 10), aspectRatio: generationAspect }),
       signal: controller.signal,
     })
     const result = await response.json() as { data?: string; mimeType?: string; message?: string }
@@ -216,21 +271,21 @@ function App() {
       setGenerationMessage('Facebook export uses LTX Video to create the selected format. Select LTX Video first.')
       return
     }
-    if (selectedModel.name === 'LTX Video' && !referenceImage) {
+    if (selectedModel.name === 'LTX Video' && !referenceImage && sequenceItems.length === 0) {
       setStatus('error')
       setGeneratedMedia(null)
       setGeneratedMediaIsVideo(false)
       setGenerationMessage('Import an image first. LTX Video uses the selected image to create the animation.')
       return
     }
-    if (referenceImage && selectedModel.name === 'Wan 2.1 · 1.3B') {
+    if ((referenceImage || sequenceItems.length > 0) && selectedModel.name === 'Wan 2.1 · 1.3B') {
       setStatus('error')
       setGeneratedMedia(null)
       setGeneratedMediaIsVideo(false)
       setGenerationMessage('Reference images require the LTX Desktop I2V engine. Wan 2.1 · 1.3B is text-to-video only, so no unrelated video was created.')
       return
     }
-    if (referenceImage && selectedModel.name === 'LTX Video') {
+    if ((referenceImage || sequenceItems.length > 0) && selectedModel.name === 'LTX Video') {
       cancelRequestedRef.current = false
       setStatus('connecting')
       setGenerationStartedAt(Date.now())
@@ -271,7 +326,8 @@ function App() {
     setGenerationMessage('Connecting to ComfyUI...')
     try {
       const workflow = await fetch('/wan_text_to_video_api.json').then((response) => response.json())
-      workflow['6'].inputs.text = prompt
+      const videoPrompt = prompt.trim()
+      workflow['6'].inputs.text = videoPrompt
       const dimensions: Record<string, [number, number]> = {
         '16:9': [512, 288],
         '9:16': [288, 512],
@@ -313,47 +369,66 @@ function App() {
     }
   }
 
-  const importImage = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const importMedia = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? [])
     if (files.length === 0) return
-    const additions = files.map((file) => ({ id: crypto.randomUUID(), file, url: URL.createObjectURL(file) }))
-    const firstImage = sequenceImages[0] ?? additions[0]
-    setSequenceImages((currentImages) => [...currentImages, ...additions])
-    setReferenceImage(firstImage.url)
-    setReferenceFile(firstImage.file)
+    const additions = files.filter((file) => file.type.startsWith('image/') || file.type.startsWith('video/')).map((file) => ({ id: crypto.randomUUID(), file, url: URL.createObjectURL(file), kind: file.type.startsWith('video/') ? 'video' as const : 'image' as const, animate: true }))
+    if (additions.length === 0) {
+      setGenerationMessage('Choose image or video files to add to the sequence.')
+      event.target.value = ''
+      return
+    }
+    const nextItems = [...sequenceItems, ...additions].slice(0, 20)
+    additions.slice(Math.max(0, 20 - sequenceItems.length)).forEach((item) => URL.revokeObjectURL(item.url))
+    const firstItem = sequenceItems[0] ?? nextItems[0]
+    setSequenceItems(nextItems)
+    setReferenceImage(firstItem?.url ?? null)
+    setReferenceFile(firstItem?.kind === 'image' ? firstItem.file : null)
     setGeneratedMedia(null)
     setGeneratedMediaIsVideo(false)
-    setGenerationMessage(files.length > 1 ? `${files.length} images added to the sequence.` : 'Image added to the sequence.')
+    setGenerationMessage(`${Math.min(additions.length, Math.max(0, 20 - sequenceItems.length))} media item${additions.length === 1 ? '' : 's'} added. Images will be animated; video clips will keep their original motion.`)
     setStatus('idle')
     event.target.value = ''
   }
 
-  const removeSequenceImage = (id: string) => {
-    const removed = sequenceImages.find((image) => image.id === id)
-    if (removed) URL.revokeObjectURL(removed.url)
-    const nextImages = sequenceImages.filter((image) => image.id !== id)
-    setSequenceImages(nextImages)
-    setReferenceImage(nextImages[0]?.url ?? null)
-    setReferenceFile(nextImages[0]?.file ?? null)
+  const updateVideoDuration = (id: string, durationSeconds: number) => {
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return
+    setSequenceItems((items) => items.map((item) => item.id === id ? { ...item, duration: durationSeconds } : item))
+  }
+
+  const toggleSequenceAnimation = (id: string) => {
+    setSequenceItems((items) => items.map((item) => item.id === id && item.kind === 'image' ? { ...item, animate: item.animate === false } : item))
     setGeneratedMedia(null)
     setGeneratedMediaIsVideo(false)
   }
 
-  const moveSequenceImage = (index: number, direction: -1 | 1) => {
+  const removeSequenceItem = (id: string) => {
+    const removed = sequenceItems.find((item) => item.id === id)
+    if (removed) URL.revokeObjectURL(removed.url)
+    const nextItems = sequenceItems.filter((item) => item.id !== id)
+    setSequenceItems(nextItems)
+    setReferenceImage(nextItems[0]?.url ?? null)
+    setReferenceFile(nextItems[0]?.kind === 'image' ? nextItems[0].file : null)
+    setGeneratedMedia(null)
+    setGeneratedMediaIsVideo(false)
+  }
+
+  const moveSequenceItem = (index: number, direction: -1 | 1) => {
     const targetIndex = index + direction
-    if (targetIndex < 0 || targetIndex >= sequenceImages.length) return
-    const nextImages = [...sequenceImages]
-    ;[nextImages[index], nextImages[targetIndex]] = [nextImages[targetIndex], nextImages[index]]
-    setSequenceImages(nextImages)
-    setReferenceImage(nextImages[0].url)
-    setReferenceFile(nextImages[0].file)
+    if (targetIndex < 0 || targetIndex >= sequenceItems.length) return
+    const nextItems = [...sequenceItems]
+    ;[nextItems[index], nextItems[targetIndex]] = [nextItems[targetIndex], nextItems[index]]
+    setSequenceItems(nextItems)
+    setReferenceImage(nextItems[0].url)
+    setReferenceFile(nextItems[0].kind === 'image' ? nextItems[0].file : null)
     setGeneratedMedia(null)
     setGeneratedMediaIsVideo(false)
   }
 
   const removeImage = () => {
-    sequenceImages.forEach((image) => URL.revokeObjectURL(image.url))
-    setSequenceImages([])
+    sequenceItems.forEach((item) => URL.revokeObjectURL(item.url))
+    setSequenceItems([])
+    setMuteOriginalAudio(false)
     setReferenceImage(null)
     setReferenceFile(null)
   }
@@ -377,18 +452,18 @@ function App() {
 
   const startNewVideo = () => {
     setPrompt('')
+    setTranslationStatus('idle')
+    setTranslationError('')
     setSelectedModel(models[1])
     setDuration('5 sec')
-    setAspect('9:16')
-    setExportPreset('facebook-reel')
     setGeneratedMedia(null)
     setGeneratedMediaIsVideo(false)
     setReferenceImage((currentImage) => {
       if (currentImage) URL.revokeObjectURL(currentImage)
       return null
     })
-    sequenceImages.forEach((image) => URL.revokeObjectURL(image.url))
-    setSequenceImages([])
+    sequenceItems.forEach((item) => URL.revokeObjectURL(item.url))
+    setSequenceItems([])
     setReferenceFile(null)
     setMusicTrack((currentTrack) => {
       if (currentTrack) URL.revokeObjectURL(currentTrack.url)
@@ -457,12 +532,12 @@ function App() {
     reader.readAsDataURL(file)
   })
 
-  const mixVideoWithMusic = async (videoUrl: string, track: { name: string; url: string; file: File } | null = musicTrack) => {
+  const mixVideoWithMusic = async (videoUrl: string, track: { name: string; url: string; file: File } | null = musicTrack, preserveOriginalAudio = sequenceItems.some((item) => item.kind === 'video') && !muteOriginalAudio) => {
     if (!track) return videoUrl
     const response = await fetch('http://127.0.0.1:41955/mix', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audioData: await fileToDataUrl(track.file), trimStart: musicTrimStartSeconds, ...(videoUrl.startsWith('data:') ? { videoData: videoUrl } : { videoUrl }) }),
+      body: JSON.stringify({ audioData: await fileToDataUrl(track.file), trimStart: musicTrimStartSeconds, preserveOriginalAudio, ...(videoUrl.startsWith('data:') ? { videoData: videoUrl } : { videoUrl }) }),
     })
     const result = await response.json() as { data?: string; mimeType?: string; message?: string }
     if (!response.ok || !result.data || !result.mimeType) throw new Error(result.message ?? 'Unable to add music to the video.')
@@ -472,15 +547,17 @@ function App() {
   const extendGeneratedVideo = async () => {
     if (!generatedMedia || !generatedMediaIsVideo) return
     const preserveComposition = exportPreset === 'facebook-feed' || aspect === '4:5'
-    const extensionPrompt = preserveComposition
-      ? `${prompt}. Continue with the same wide group framing as the existing video. Keep every person visible at both edges of the frame. Locked static camera, no zoom, crop, or reframing.`
-      : prompt
     cancelRequestedRef.current = false
     setStatus('connecting')
     setGenerationStartedAt(Date.now())
     setGenerationElapsedSeconds(0)
     setGenerationMessage('Extending the video locally...')
     try {
+      const currentPrompt = prompt.trim()
+      const extensionPrompt = [
+        currentPrompt,
+        preserveComposition ? 'Continue with the same wide group framing as the existing video. Keep every person visible at both edges of the frame. Locked static camera, no zoom, crop, or reframing.' : '',
+      ].filter(Boolean).join(' ')
       const response = await fetch('http://127.0.0.1:41955/extend', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -535,7 +612,7 @@ function App() {
     if (audio) audio.currentTime = start
   }
 
-  const canvasActions = <div className="canvas-actions"><button className="new-video-button" onClick={startNewVideo}><Plus size={15} /> New video</button><div className="import-control"><input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={importImage} /><button className="text-button" onClick={() => fileInputRef.current?.click()}><Film size={16} /> {referenceImage ? 'Add images' : 'Import images'}</button>{referenceImage && <button className="remove-image" onClick={removeImage} aria-label="Remove all sequence images" title="Remove all images"><X size={14} /></button>}</div></div>
+  const canvasActions = <div className="canvas-actions"><button className="new-video-button" onClick={startNewVideo}><Plus size={15} /> New video</button><div className="import-control"><input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,video/quicktime,video/x-matroska" multiple onChange={importMedia} /><button className="text-button" onClick={() => fileInputRef.current?.click()}><Film size={16} /> {sequenceItems.length ? 'Add media' : 'Import media'}</button>{sequenceItems.length > 0 && <button className="remove-image" onClick={removeImage} aria-label="Remove all sequence media" title="Remove all media"><X size={14} /></button>}</div></div>
 
   return (
     <main className="app-shell">
@@ -549,12 +626,15 @@ function App() {
       <section className="workspace">
         <aside className="sidebar">
           {activeView === 'studio' && <div className="studio-controls">
-            <div className="prompt-card"><div className="prompt-top"><span className="prompt-label">PROMPT</span><span className="prompt-count">{prompt.length} / 1,000</span></div><textarea value={prompt} onChange={(event) => setPrompt(event.target.value.slice(0, 1000))} maxLength={1000} spellCheck={false} aria-label="Video prompt" /></div>
-            <div className="music-control canvas-music-control"><input ref={musicInputRef} type="file" accept="audio/*" onChange={importMusic} /><button className="music-button" onClick={() => musicInputRef.current?.click()}><Music2 size={16} /> {musicTrack ? 'Change music' : 'Insert audio'}</button>{musicTrack && <><span title={musicTrack.name}>{musicTrack.name}</span><button className="remove-music" onClick={removeMusic} aria-label="Remove selected music" title="Remove music"><X size={14} /></button></>}</div>{musicTrack && <><div className="music-trim-control"><label><span>START · {formatMusicTime(musicTrimStartSeconds)}</span><input type="range" min="0" max={Math.max(0, musicDurationSeconds - 1)} step="1" value={Math.min(musicTrimStartSeconds, Math.max(0, musicDurationSeconds - 1))} disabled={!musicDurationSeconds} onChange={(event) => updateMusicTrimStart(Number(event.target.value))} /></label></div><small className="music-trim-hint">Choose where the music starts; it plays to the end of the video.</small><audio ref={musicPreviewRef} className="music-player" src={musicTrack.url} controls onLoadedMetadata={(event) => { const trackDuration = Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0; setMusicDurationSeconds(trackDuration) }} onPlay={(event) => { const audio = event.currentTarget; if (audio.currentTime < musicTrimStartSeconds) audio.currentTime = musicTrimStartSeconds }} /></>}
-            <div className="controls"><label><span>EXPORT PRESET</span><div className="select-control-wrap"><select className="select-control" value={exportPreset} onChange={(event) => { const nextPreset = event.target.value; setExportPreset(nextPreset); setAspect(exportPresets[nextPreset].aspect); if (nextPreset.startsWith('facebook-')) setDuration('5 sec') }}>{Object.entries(exportPresets).map(([value, preset]) => <option key={value} value={value}>{preset.label}</option>)}</select><span className="select-chevron">⌄</span></div></label><label><span>MODEL</span><div className="select-control-wrap"><span className={`model-mark ${selectedModel.color}`}><Layers3 size={13} /></span><select className="select-control model-select" value={selectedModel.name} onChange={(event) => setSelectedModel(models.find((model) => model.name === event.target.value) ?? models[0])}>{models.map((model) => <option key={model.name} value={model.name} disabled={!model.installed}>{model.name}{model.installed ? '' : ' · not installed'}</option>)}</select><span className="select-chevron">⌄</span></div></label><label><span>DURATION</span><div className="select-control-wrap"><select className="select-control" value={duration} onChange={(event) => setDuration(event.target.value)}><option>3 sec</option><option>5 sec</option><option>8 sec</option><option>10 sec</option></select><span className="select-chevron">⌄</span></div></label><label><span>FORMAT</span><div className="select-control-wrap"><select className="select-control" value={aspect} onChange={(event) => setAspect(event.target.value)}><option>16:9</option><option>9:16</option><option>4:5</option><option>3:4</option><option>1:1</option></select><span className="select-chevron">⌄</span></div></label></div>
+            {sequenceItems.some((item) => item.kind === 'video') && <label className="mute-original-audio"><input type="checkbox" checked={muteOriginalAudio} onChange={(event) => setMuteOriginalAudio(event.target.checked)} /><span>Mute original clip audio</span><small>{musicTrack ? (muteOriginalAudio ? 'Your inserted music replaces the clips’ sound.' : 'Original clip sound is mixed quietly under your music.') : 'Imported clips will be silent; add music if you want a soundtrack.'}</small></label>}
+            <div className="controls"><label><span>EXPORT PRESET</span><div className="select-control-wrap"><select className="select-control" value={exportPreset} onChange={(event) => { const nextPreset = event.target.value; setExportPreset(nextPreset); setAspect(exportPresets[nextPreset].aspect); if (nextPreset.startsWith('facebook-')) setDuration('5 sec') }}>{Object.entries(exportPresets).map(([value, preset]) => <option key={value} value={value}>{preset.label}</option>)}</select><span className="select-chevron">⌄</span></div></label><label><span>MODEL</span><div className="select-control-wrap"><span className={`model-mark ${selectedModel.color}`}><Layers3 size={13} /></span><select className="select-control model-select" value={selectedModel.name} onChange={(event) => setSelectedModel(models.find((model) => model.name === event.target.value) ?? models[0])}>{models.map((model) => <option key={model.name} value={model.name} disabled={!model.installed}>{model.name}{model.installed ? '' : ' · not installed'}</option>)}</select><span className="select-chevron">⌄</span></div></label><label><span>DURATION</span><div className="select-control-wrap"><select className="select-control" value={duration} onChange={(event) => setDuration(event.target.value)}><option>3 sec</option><option>5 sec</option><option>8 sec</option><option>10 sec</option></select><span className="select-chevron">⌄</span></div></label><label><span>FORMAT</span><div className="select-control-wrap"><select className="select-control" value={aspect} onChange={(event) => setAspect(event.target.value)}><option>16:9</option><option>9:16</option></select><span className="select-chevron">⌄</span></div></label></div>
             {generationMessage && <p className={`generation-message ${status === 'error' ? 'error' : ''}`}>{generationMessage}</p>}
             {canStopGeneration && <button className="cancel-render-button" onClick={cancelGeneration}><X size={14} /> Stop generation</button>}
             {status === 'connecting' && <div className="render-progress" aria-live="polite"><div className="render-progress-top"><span>RENDERING {renderProgress}%</span><span>ETA ~{formatTime(remainingSeconds)}</span></div><div className="render-progress-track"><span style={{ width: `${renderProgress}%` }} /></div><div className="render-progress-bottom"><span>Elapsed {formatTime(generationElapsedSeconds)}</span><span>Estimate updates live</span></div></div>}
+            <div className="music-section">
+              <div className="music-control canvas-music-control"><input ref={musicInputRef} type="file" accept="audio/*" onChange={importMusic} /><button className="music-button" onClick={() => musicInputRef.current?.click()}><Music2 size={16} /> {musicTrack ? 'Change music' : 'Insert audio'}</button>{musicTrack && <><span title={musicTrack.name}>{musicTrack.name}</span><button className="remove-music" onClick={removeMusic} aria-label="Remove selected music" title="Remove music"><X size={14} /></button></>}</div>
+              {musicTrack && <><div className="music-trim-control"><label><span>START · {formatMusicTime(musicTrimStartSeconds)}</span><input type="range" min="0" max={Math.max(0, musicDurationSeconds - 1)} step="1" value={Math.min(musicTrimStartSeconds, Math.max(0, musicDurationSeconds - 1))} disabled={!musicDurationSeconds} onChange={(event) => updateMusicTrimStart(Number(event.target.value))} /></label></div><small className="music-trim-hint">Choose where the music starts; it plays to the end of the video.</small><audio ref={musicPreviewRef} className="music-player" src={musicTrack.url} controls onLoadedMetadata={(event) => { const trackDuration = Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0; setMusicDurationSeconds(trackDuration) }} onPlay={(event) => { const audio = event.currentTarget; if (audio.currentTime < musicTrimStartSeconds) audio.currentTime = musicTrimStartSeconds }} /></>}
+            </div>
           </div>}
           <div className="side-divider" />
         </aside>
@@ -563,9 +643,15 @@ function App() {
         <div className="canvas-area">
           <div className="canvas-head"><div><p className="section-kicker">NEW PROJECT</p><h2>Describe your shot</h2></div></div>
           <div className="media-grid">
-            {referenceImage && <div className="reference-column"><div className="reference-image"><img src={referenceImage} alt="First image in sequence" /><span>{sequenceImages.length > 1 ? 'SEQUENCE PREVIEW' : 'REFERENCE IMAGE'}</span></div>{sequenceImages.length > 1 && <div className="sequence-editor"><div className="sequence-editor-heading"><span>{sequenceImages.length} IMAGES</span><small>Use arrows to set order · duration applies to each image</small></div><div className="sequence-thumbnails">{sequenceImages.map((image, index) => <div className="sequence-thumbnail" key={image.id}><img src={image.url} alt={`Sequence image ${index + 1}`} /><span className="sequence-number">{String(index + 1).padStart(2, '0')}</span><div className="sequence-thumbnail-actions"><button onClick={() => moveSequenceImage(index, -1)} disabled={index === 0} aria-label={`Move image ${index + 1} earlier`} title="Move earlier"><ArrowUp size={12} /></button><button onClick={() => moveSequenceImage(index, 1)} disabled={index === sequenceImages.length - 1} aria-label={`Move image ${index + 1} later`} title="Move later"><ArrowDown size={12} /></button><button onClick={() => removeSequenceImage(image.id)} aria-label={`Remove image ${index + 1}`} title="Remove image"><X size={12} /></button></div></div>)}</div><small className="sequence-duration-note">LTX animates each photo separately, then joins the clips with soft fades. Facial details may change slightly during animation. Each image: {duration}. Total: {(sequenceImages.length * Number.parseInt(duration, 10) - Math.max(0, sequenceImages.length - 1) * 0.4).toFixed(1)} sec.</small></div>}<button className="image-generate-button" onClick={generate} disabled={status === 'connecting'}>{status === 'connecting' ? <><LoaderCircle className="spin" size={16} /> Rendering...</> : <><Sparkles size={16} /> {sequenceImages.length > 1 ? 'Generate sequence' : 'Generate video'} <ArrowUpRight size={16} /></>}</button></div>}
+            {sequenceItems.length > 0 && <div className="reference-column"><div className="reference-image">{sequenceItems[0].kind === 'video' ? <video src={sequenceItems[0].url} muted playsInline onLoadedMetadata={(event) => updateVideoDuration(sequenceItems[0].id, event.currentTarget.duration)} /> : <img src={sequenceItems[0].url} alt="First image in sequence" />}<span>{sequenceItems.length > 1 ? 'SEQUENCE PREVIEW' : sequenceItems[0].kind === 'video' ? 'VIDEO CLIP' : 'REFERENCE IMAGE'}</span>{sequenceItems.length === 1 && sequenceItems[0].kind === "image" && <button className="single-image-toggle" onClick={() => toggleSequenceAnimation(sequenceItems[0].id)} title={sequenceItems[0].animate === false ? "Animate photo" : "Keep photo still"}><Sparkles size={13} /> {sequenceItems[0].animate === false ? "Animate photo" : "Keep photo still"}</button>}</div>{sequenceItems.length > 1 && <div className="sequence-editor"><div className="sequence-editor-heading"><span>{sequenceItems.length} MEDIA ITEMS</span><small>Use arrows to set playback order</small></div><div className="sequence-thumbnails">{sequenceItems.map((item, index) => <div className="sequence-thumbnail" key={item.id}>{item.kind === 'video' ? <video src={item.url} muted playsInline onLoadedMetadata={(event) => updateVideoDuration(item.id, event.currentTarget.duration)} /> : <img src={item.url} alt={`Sequence image ${index + 1}`} />}<span className="sequence-number">{String(index + 1).padStart(2, '0')} · {item.kind === 'video' ? 'VIDEO' : item.animate === false ? 'STILL' : 'PHOTO'}</span><div className="sequence-thumbnail-actions"><button onClick={() => moveSequenceItem(index, -1)} disabled={index === 0} aria-label={`Move media ${index + 1} earlier`} title="Move earlier"><ArrowUp size={12} /></button><button onClick={() => moveSequenceItem(index, 1)} disabled={index === sequenceItems.length - 1} aria-label={`Move media ${index + 1} later`} title="Move later"><ArrowDown size={12} /></button>{item.kind === 'image' && <button className={item.animate === false ? 'sequence-still-toggle is-still' : 'sequence-still-toggle'} onClick={() => toggleSequenceAnimation(item.id)} aria-label={item.animate === false ? `Animate photo ${index + 1}` : `Keep photo ${index + 1} still`} title={item.animate === false ? 'Animate photo' : 'Keep photo still'}><Sparkles size={12} /></button>}<button onClick={() => removeSequenceItem(item.id)} aria-label={`Remove media ${index + 1}`} title="Remove media"><X size={12} /></button></div></div>)}</div><small className="sequence-duration-note">Photos are animated separately; click the sparkle to keep a photo still. Video clips keep their original motion and duration.</small></div>}<button className="image-generate-button" onClick={generate} disabled={status === 'connecting'}>{status === 'connecting' ? <><LoaderCircle className="spin" size={16} /> Rendering...</> : <><Sparkles size={16} /> {sequenceItems.length > 1 ? 'Generate sequence' : 'Generate video'} <ArrowUpRight size={16} /></>}</button></div>}
             <section className="center-preview"><div className="preview-head"><span>PREVIEW</span><span className="render-status"><i /> {generatedMedia ? 'Complete' : status === 'connecting' ? 'Rendering' : 'Ready'}</span></div><div className="standard-preview"><div className={`preview-frame ${aspect === '9:16' ? 'portrait-preview' : ''}`} style={{ aspectRatio: aspect.replace(':', ' / ') }}>{generatedMedia ? generatedMediaIsVideo ? <video className="generated-video" src={generatedMedia} controls playsInline preload="metadata" /> : <img className="generated-video" src={generatedMedia} alt="Generated video preview" /> : <><div className="preview-placeholder"><div className="play-ring"><Play size={17} fill="currentColor" /></div><span>Your next shot<br /><b>will live here</b></span></div></>}</div></div>{generatedMedia && <div className="preview-actions"><div className="video-file-actions"><a className="download-button" href={generatedMedia} download={`${exportPreset}-${exportPresets[exportPreset].width}x${exportPresets[exportPreset].height}.mp4`} title="Download video"><Download size={15} /> Download video</a><button className="delete-button" onClick={removeVideo} title="Delete video"><Trash2 size={15} /> Delete</button></div><div className="extend-control"><select value={extensionDuration} onChange={(event) => setExtensionDuration(event.target.value)} aria-label="Additional video duration"><option value="5">+5 sec</option><option value="10">+10 sec</option><option value="20">+20 sec</option></select><button className="extend-button" onClick={extendGeneratedVideo} disabled={status === 'connecting'}>Extend</button></div></div>}<div className="preview-note"><Gauge size={15} /><span>{exportPreset.startsWith('facebook-') ? `${exportPresets[exportPreset].label} · MP4` : 'Rendered locally on your GPU'}</span></div></section>
           </div>
+          {activeView === 'studio' && <div className="prompt-card canvas-prompt-card">
+            <div className="prompt-top"><span className="prompt-label">VIDEO PROMPT</span><span className="prompt-count">{prompt.length} / 1,000</span></div>
+            <textarea value={prompt} onChange={(event) => { setPrompt(event.target.value.slice(0, 1000)); setTranslationStatus('idle'); setTranslationError('') }} disabled={translationStatus === 'translating'} maxLength={1000} spellCheck={false} aria-label="Video prompt in Italian or English" />
+            <button className="translate-prompt-button" onClick={() => { void translatePromptLocally(prompt).catch(() => undefined) }} disabled={!prompt.trim() || translationStatus === 'translating' || translationStatus === 'ready' || status === 'connecting'}>{translationStatus === 'translating' ? 'Translating locally…' : translationStatus === 'ready' ? 'Translated to English' : 'Translate to English'}</button>
+            {translationStatus === 'error' && translationError && <p className="translation-error">{translationError}</p>}
+          </div>}
         </div>
 
       </section>
